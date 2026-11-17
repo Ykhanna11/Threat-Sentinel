@@ -1,11 +1,11 @@
 # ThreatSentinel
 
-ThreatSentinel is a privacy-first cybersecurity intelligence platform in development by Meta Infinium. This repository contains its initial engineering foundation; it is **not production-ready** and does not yet implement threat analysis, authentication, billing, or other product capabilities.
+ThreatSentinel is a privacy-first cybersecurity intelligence platform in development by Meta Infinium. This repository contains its engineering foundation; it is **not production-ready** and does not yet implement threat analysis, authentication flows/provider integration, billing, or other product capabilities.
 
 ## Repository
 
 - `apps/web` — Next.js App Router application
-- `apps/api` — FastAPI application, database connectivity, and Alembic configuration
+- `apps/api` — FastAPI application, identity and tenancy domain foundations, SQLAlchemy, and Alembic
 - `packages/shared-contracts` — reserved workspace package for future API contracts and shared TypeScript types
 - `infrastructure/docker` — local PostgreSQL Compose configuration
 - `infrastructure/deployment` — deployment direction and future work
@@ -67,7 +67,13 @@ pnpm db:down
 
 To remove the local database and its persisted data, run `pnpm db:down:volumes`. This is destructive and intended only for local development.
 
-The example `.env` configures the API to connect to this local database. No migrations are defined yet; the Alembic environment is configured for future migrations.
+The example `.env` configures the API to connect to this local database. The initial migration creates the identity and organization-tenancy schema:
+
+```bash
+uv run --directory apps/api --project . alembic upgrade head
+```
+
+Identity and tenancy are not exposed through product API routes yet.
 
 ## Checks and tests
 
@@ -76,6 +82,9 @@ pnpm lint
 pnpm typecheck
 pnpm test:web
 pnpm test:api
+uv run --directory apps/api --project . ruff check
+uv run --directory apps/api --project . ruff format --check
+uv run --directory apps/api --project . mypy
 ```
 
 The end-to-end browser smoke test uses Playwright. Install its Chromium browser once, then run it:
@@ -91,7 +100,7 @@ On Linux hosts missing browser libraries, install Playwright's system dependenci
 pnpm --filter @threat-sentinel/web exec playwright install-deps chromium
 ```
 
-`pnpm validate` checks that required foundation files and directories exist. CI runs validation, frontend linting/type checking and Vitest, plus the backend Pytest suite. Playwright is available for local end-to-end testing.
+`pnpm validate` checks that required foundation files and directories exist. CI runs validation, frontend linting/type checking and Vitest, plus backend linting, formatting, type checking, and Pytest. Playwright is available for local end-to-end testing.
 
 ## Architecture and status
 

@@ -11,8 +11,8 @@ Browser
 apps/api (FastAPI, Pydantic Settings)
   ├── versioned HTTP routes (/api/v1)
   ├── shared configuration and structured logging
-  ├── optional SQLAlchemy engine and session layer
-  └── reserved application modules
+  ├── SQLAlchemy session layer and Alembic migrations
+  └── modular application domains
         ├── identity
         ├── tenants
         ├── detection
@@ -25,7 +25,19 @@ apps/api (FastAPI, Pydantic Settings)
 PostgreSQL (optional local development dependency)
 ```
 
-The API currently exposes only liveness and readiness checks. The database URL is optional: readiness reports `not_configured` when absent, and checks the connection when present. There are no models or migrations yet. Reserved modules contain no business logic.
+The API currently exposes only liveness and readiness checks. The database URL remains optional at startup: readiness reports `not_configured` when absent and checks connectivity when present. An additive initial migration now defines the identity and organization schema; there are still no product-facing identity or tenant endpoints.
+
+## Identity and tenant boundaries
+
+- `User` is an internal account with a stable UUID. `ExternalIdentity` maps a verified provider issuer and subject to that account; the `(issuer, subject)` pair is unique. Email is optional metadata, and a verified email is never used to merge accounts or identify a user.
+- `VerifiedUserContext` is the normalized contract expected from an authentication adapter. `AuthenticationProvider` is only a provider-neutral protocol; JWT verification, OIDC discovery/JWKS handling, and WorkOS AuthKit integration are not implemented.
+- `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial coarse roles; fine-grained and custom permission policies remain future work.
+- `OrganizationService` requires a `VerifiedUserContext`, resolves it to a local user by issuer and subject, then checks the active organization and membership in the database. A caller-supplied organization UUID alone is not an authorization check. Provider organization roles or claims are not consumed as application permissions.
+- Pending invitations have a database-enforced unique key per organization and normalized email (lowercase and trimmed); terminal invitations do not block reissue. Invitation delivery and state-transition endpoints are not implemented.
+- `get_session()` is a request-scoped session resource, not a commit boundary. Mutating application operations must run inside `unit_of_work()`, which owns commit on success, rollback on exceptions, and session closure.
+- `require_active_owner()` validates a projected membership state before a future role/removal operation. Membership changes, owner transfer/removal rules, invitation state-transition services, and automatic enforcement that an organization retain an active owner are not implemented; call the invariant from such operations before exposing management endpoints.
+
+These are application and persistence foundations, not a complete authentication or authorization system. No protected HTTP route currently consumes these services.
 
 `packages/shared-contracts` is an intentionally empty starting point for future shared API contracts. It must not become a copy of backend business logic.
 
@@ -33,10 +45,11 @@ The API currently exposes only liveness and readiness checks. The database URL i
 
 - Keep the initial backend as a modular monolith with clear application boundaries. Extract services only when measured scale or independent operational requirements support doing so.
 - Keep HTTP contracts versioned and separate from persistence models.
-- Keep persistence optional until a real domain schema and migrations are designed.
+- Keep the database optional for health-only startup; database-backed operations require a configured database and applied migrations.
+- Keep external authentication at a provider adapter boundary, while local user state, organization membership, and authorization remain application-owned.
 - Introduce provider-neutral adapters at actual integration boundaries, including future local/cloud inference. No AI provider is selected or integrated.
 - Treat tenancy, privacy, retention, authorization, and auditability as architecture requirements before adding sensitive workflows.
 
 ## Planned, not implemented
 
-Authentication, authorization, tenant management, detection, risk assessment, AI inference, investigations, intelligence feeds, billing, developer integrations, security audit storage, and production deployment are future capabilities. Their presence as directories or documentation headings is not implementation evidence.
+Token verification, public authentication/tenant APIs, invitation delivery and acceptance, fine-grained permissions, detection, risk assessment, AI inference, investigations, intelligence feeds, billing, developer integrations, security audit storage, and production deployment are future capabilities. The identity and tenancy records and service boundaries described above are implemented foundations, not completed product capabilities.

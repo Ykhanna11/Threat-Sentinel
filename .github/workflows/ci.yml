@@ -37,7 +37,7 @@ jobs:
       - run: pnpm test:web
 
   backend:
-    name: Backend tests
+    name: Backend quality and tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -47,4 +47,7 @@ jobs:
           python-version: "3.14"
           enable-cache: true
       - run: uv sync --project apps/api --locked --all-groups
+      - run: uv run --directory apps/api --project . ruff check
+      - run: uv run --directory apps/api --project . ruff format --check
+      - run: uv run --directory apps/api --project . mypy
       - run: uv run --directory apps/api --project . pytest

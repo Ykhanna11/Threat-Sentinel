@@ -1,1 +1,1 @@
-"""Identity module placeholder; no authentication is implemented."""
+"""Local user and external identity domain."""

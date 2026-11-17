@@ -4,7 +4,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from threat_sentinel_api.core.config import get_settings
-from threat_sentinel_api.db.base import Base
+from threat_sentinel_api.db.model_registry import metadata as target_metadata
 
 config = context.config
 
@@ -16,7 +16,6 @@ if database_url is None:
     raise RuntimeError("DATABASE_URL must be configured to run database migrations.")
 
 config.set_main_option("sqlalchemy.url", database_url.get_secret_value().replace("%", "%%"))
-target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:

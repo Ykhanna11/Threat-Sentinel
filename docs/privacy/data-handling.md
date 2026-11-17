@@ -10,4 +10,6 @@ ThreatSentinel is intended to be privacy-first. The following are design require
 - Document consent, lawful basis, subprocessors, residency, and customer controls as product and jurisdictional requirements become known.
 - Keep development data synthetic and credentials local-only. Do not copy production data into development or test environments.
 
-The current application has no user data model, analysis endpoint, cloud inference integration, analytics pipeline, or production data store.
+The identity foundation stores an internal user UUID and provider issuer/subject mapping. Optional email metadata and its verification timestamp are attached to the external identity; email is not used to link accounts. Organization invitations retain their intended email and lifecycle metadata, so those fields are personal data and require deliberate retention/deletion policy before production use. No invitation bearer token is generated or stored.
+
+The current application has no product-facing identity or organization endpoints, analysis endpoint, cloud inference integration, analytics pipeline, or production data store.

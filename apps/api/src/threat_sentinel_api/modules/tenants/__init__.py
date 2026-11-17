@@ -1,1 +1,1 @@
-"""Tenant module placeholder; no tenant model or isolation is implemented."""
+"""Organization and tenant-membership domain."""
