@@ -1,0 +1,23 @@
+{
+  "name": "threat-sentinel",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@12.16.1",
+  "engines": {
+    "node": ">=22.12",
+    "pnpm": ">=12.0.0"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @threat-sentinel/web dev",
+    "dev:api": "uv run --directory apps/api --project . uvicorn --app-dir src threat_sentinel_api.main:app --reload --host 127.0.0.1 --port 8000",
+    "db:up": "docker compose --env-file .env -f infrastructure/docker/compose.yaml up -d",
+    "db:down": "docker compose --env-file .env -f infrastructure/docker/compose.yaml down",
+    "db:down:volumes": "docker compose --env-file .env -f infrastructure/docker/compose.yaml down --volumes",
+    "lint": "pnpm --filter @threat-sentinel/web lint",
+    "typecheck": "pnpm --filter @threat-sentinel/web typecheck",
+    "test:web": "pnpm --filter @threat-sentinel/web test",
+    "test:api": "uv run --directory apps/api --project . pytest",
+    "test:e2e": "pnpm --filter @threat-sentinel/web test:e2e",
+    "validate": "python scripts/validate_project.py"
+  }
+}
