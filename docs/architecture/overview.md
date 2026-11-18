@@ -30,7 +30,16 @@ The API currently exposes only liveness and readiness checks. The database URL r
 ## Identity and tenant boundaries
 
 - `User` is an internal account with a stable UUID. `ExternalIdentity` maps a verified provider issuer and subject to that account; the `(issuer, subject)` pair is unique. Email is optional metadata, and a verified email is never used to merge accounts or identify a user.
-- `VerifiedUserContext` is the normalized contract expected from an authentication adapter. `AuthenticationProvider` is only a provider-neutral protocol; JWT verification, OIDC discovery/JWKS handling, and WorkOS AuthKit integration are not implemented.
+- `VerifiedAccessTokenClaims` is a minimal, immutable internal contract for output from a future
+  successful verifier; it requires issuer, subject, audience, issuance time, and expiration, and
+  excludes the bearer token and arbitrary provider claims. `AuthenticationProvider` is only a
+  provider-neutral protocol and now returns this type. The type does not itself verify a token.
+- `VerifiedUserContext` remains the Phase 2A internal issuer/subject and email-metadata contract
+  used by identity and tenancy services; it is neither an untrusted request schema nor proof of
+  token verification. `IdentityService.resolve_authenticated_principal()` resolves verified
+  claims to an active local user and returns an immutable `AuthenticatedPrincipal` containing
+  local and external identity IDs. That principal is not an authorization grant. JWT verification,
+  OIDC discovery/JWKS handling, and authentication routes are not implemented.
 - `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial coarse roles; fine-grained and custom permission policies remain future work.
 - `OrganizationService` requires a `VerifiedUserContext`, resolves it to a local user by issuer and subject, then checks the active organization and membership in the database. A caller-supplied organization UUID alone is not an authorization check. Provider organization roles or claims are not consumed as application permissions.
 - Pending invitations have a database-enforced unique key per organization and normalized email (lowercase and trimmed); terminal invitations do not block reissue. Invitation delivery and state-transition endpoints are not implemented.

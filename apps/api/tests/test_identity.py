@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 from collections.abc import Callable
+from datetime import timedelta
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -10,9 +12,26 @@ from sqlalchemy.orm import Session
 from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
-from threat_sentinel_api.modules.identity.schemas import VerifiedUserContext
+from threat_sentinel_api.modules.identity.schemas import (
+    AuthenticatedPrincipal,
+    VerifiedAccessTokenClaims,
+    VerifiedUserContext,
+)
 from threat_sentinel_api.modules.identity.service import IdentityService, InactiveUserError
 from threat_sentinel_api.modules.tenants.models import OrganizationMembership
+
+
+def _verified_claims(**overrides: object) -> VerifiedAccessTokenClaims:
+    now = datetime.now(UTC)
+    claims: dict[str, object] = {
+        "issuer": "https://issuer.example",
+        "subject": "subject-123",
+        "audiences": ("threat-sentinel-api",),
+        "issued_at": now,
+        "expires_at": now + timedelta(minutes=5),
+    }
+    claims.update(overrides)
+    return VerifiedAccessTokenClaims(**claims)
 
 
 def test_external_identity_resolves_same_internal_user(session: Session) -> None:
@@ -211,6 +230,134 @@ def test_verified_context_cannot_mark_an_absent_email_as_verified() -> None:
             issuer="https://issuer.example",
             subject="subject",
             email_verified=True,
+        )
+
+
+@pytest.mark.parametrize("field", ["issuer", "subject", "audiences", "issued_at", "expires_at"])
+def test_verified_access_token_claims_require_mandatory_fields(field: str) -> None:
+    claims = {
+        "issuer": "https://issuer.example",
+        "subject": "subject",
+        "audiences": ("threat-sentinel-api",),
+        "issued_at": datetime.now(UTC),
+        "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+    }
+    del claims[field]
+
+    with pytest.raises(ValidationError):
+        VerifiedAccessTokenClaims(**claims)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("issuer", ""),
+        ("issuer", "  "),
+        ("subject", ""),
+        ("subject", " \t "),
+        ("audiences", ()),
+        ("audiences", ("  ",)),
+    ],
+)
+def test_verified_access_token_claims_reject_blank_identity_and_audience(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        _verified_claims(**{field: value})
+
+
+def test_verified_access_token_claims_preserve_exact_issuer_and_subject() -> None:
+    claims = _verified_claims(
+        issuer=" https://issuer.example ",
+        subject=" subject-123 ",
+    )
+
+    assert claims.issuer == " https://issuer.example "
+    assert claims.subject == " subject-123 "
+
+
+def test_verified_user_context_preserves_exact_issuer_and_subject() -> None:
+    context = VerifiedUserContext(
+        issuer=" https://issuer.example ",
+        subject=" subject-123 ",
+    )
+
+    assert context.issuer == " https://issuer.example "
+    assert context.subject == " subject-123 "
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"issued_at": datetime(2026, 1, 1), "expires_at": datetime(2026, 1, 2)},
+        {
+            "issued_at": datetime(2026, 1, 2, tzinfo=UTC),
+            "expires_at": datetime(2026, 1, 1, tzinfo=UTC),
+        },
+        {"not_before": datetime.now(UTC) + timedelta(minutes=10)},
+        {"email_verified": True},
+    ],
+)
+def test_verified_access_token_claims_reject_invalid_claim_relationships(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        _verified_claims(**overrides)
+
+
+@pytest.mark.parametrize("claim", ["roles", "permissions", "organization_id"])
+def test_verified_access_token_claims_reject_untrusted_authorization_claims(
+    claim: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        _verified_claims(**{claim: ["admin"]})
+
+
+def test_verified_access_token_claims_do_not_retain_raw_bearer_token() -> None:
+    claims = _verified_claims()
+
+    assert not hasattr(claims, "bearer_token")
+    assert "bearer_token" not in claims.model_dump()
+
+
+def test_resolving_verified_claims_creates_immutable_local_principal_without_membership(
+    session: Session,
+) -> None:
+    principal = IdentityService(IdentityRepository(session)).resolve_authenticated_principal(
+        _verified_claims()
+    )
+
+    assert isinstance(principal, AuthenticatedPrincipal)
+    assert not isinstance(principal, VerifiedAccessTokenClaims)
+    assert isinstance(principal.user_id, UUID)
+    assert isinstance(principal.external_identity_id, UUID)
+    assert principal.issuer == "https://issuer.example"
+    assert principal.subject == "subject-123"
+    assert session.get(User, principal.user_id) is not None
+    identity = session.get(ExternalIdentity, principal.external_identity_id)
+    assert identity is not None
+    assert identity.user_id == principal.user_id
+    assert session.scalar(select(func.count()).select_from(OrganizationMembership)) == 0
+
+    with pytest.raises(ValidationError):
+        principal.user_id = uuid4()  # type: ignore[misc]
+
+
+def test_inactive_user_cannot_receive_authenticated_principal(
+    session: Session,
+    make_user: Callable[..., User],
+) -> None:
+    user = make_user(subject="inactive-subject")
+    user.status = UserStatus.SUSPENDED
+    session.flush()
+
+    with pytest.raises(InactiveUserError):
+        IdentityService(IdentityRepository(session)).resolve_authenticated_principal(
+            _verified_claims(
+                issuer="https://identity.example",
+                subject="inactive-subject",
+            )
         )
 
 

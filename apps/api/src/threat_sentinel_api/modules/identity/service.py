@@ -3,7 +3,11 @@ from datetime import UTC, datetime
 from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
-from threat_sentinel_api.modules.identity.schemas import VerifiedUserContext
+from threat_sentinel_api.modules.identity.schemas import (
+    AuthenticatedPrincipal,
+    VerifiedAccessTokenClaims,
+    VerifiedUserContext,
+)
 
 
 class InactiveUserError(PermissionError):
@@ -33,6 +37,31 @@ class IdentityService:
             )
         )
         return user
+
+    def resolve_authenticated_principal(
+        self,
+        claims: VerifiedAccessTokenClaims,
+    ) -> AuthenticatedPrincipal:
+        """Resolve verifier-produced claims to an active local identity."""
+        context = VerifiedUserContext(
+            issuer=claims.issuer,
+            subject=claims.subject,
+            email=claims.email,
+            email_verified=claims.email_verified is True,
+        )
+        user = self.resolve_verified_user(context)
+        identity = self._repository.find_by_issuer_subject(context.issuer, context.subject)
+        if identity is None or identity.user_id != user.id:
+            raise RuntimeError("Resolved identity could not be loaded.")
+
+        return AuthenticatedPrincipal(
+            user_id=user.id,
+            external_identity_id=identity.id,
+            issuer=identity.issuer,
+            subject=identity.subject,
+            email=identity.email,
+            email_verified=identity.email_verified_at is not None,
+        )
 
     @staticmethod
     def _verified_at(context: VerifiedUserContext) -> datetime | None:
