@@ -26,6 +26,13 @@ from threat_sentinel_api.modules.identity.service import IdentityService, Inacti
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
+class AuthenticationConfigurationUnavailable(HTTPException):
+    """Local trusted authentication configuration is unavailable."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
 class AuthenticatedIdentityResolver(Protocol):
     def resolve_authenticated_principal(
         self,
@@ -39,7 +46,10 @@ IdentityServiceFactory = Callable[[Session], AuthenticatedIdentityResolver]
 @lru_cache
 def get_authentication_provider() -> AuthenticationProvider:
     """Provide one verifier instance so its bounded JWKS cache is reused."""
-    return JwtAccessTokenVerifier(get_settings())
+    settings = get_settings()
+    if not settings.authentication_configured:
+        raise AuthenticationConfigurationUnavailable from None
+    return JwtAccessTokenVerifier(settings)
 
 
 def get_identity_service_factory() -> IdentityServiceFactory:

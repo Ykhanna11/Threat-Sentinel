@@ -90,6 +90,11 @@ class Settings(BaseSettings):
             raise ValueError("JWT signing algorithms must not contain duplicates")
         return value
 
+    @property
+    def authentication_configured(self) -> bool:
+        """Return whether the all-or-none trusted authentication configuration is present."""
+        return self.auth_expected_issuer is not None
+
     @model_validator(mode="after")
     def require_complete_auth_configuration(self) -> "Settings":
         auth_values = (

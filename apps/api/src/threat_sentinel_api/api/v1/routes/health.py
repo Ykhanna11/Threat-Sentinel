@@ -17,11 +17,18 @@ def health() -> dict[str, str]:
 
 @router.get("/ready", summary="Check API readiness and configured dependencies")
 def readiness(response: Response) -> dict[str, object]:
-    database_url = get_settings().database_url
+    settings = get_settings()
+    database_url = settings.database_url
+    authentication_configuration = (
+        "configured" if settings.authentication_configured else "not_configured"
+    )
     if database_url is None:
         return {
             "status": "ready",
-            "dependencies": {"database": "not_configured"},
+            "dependencies": {
+                "database": "not_configured",
+                "authentication_configuration": authentication_configuration,
+            },
         }
 
     try:
@@ -35,10 +42,16 @@ def readiness(response: Response) -> dict[str, object]:
         response.status_code = 503
         return {
             "status": "not_ready",
-            "dependencies": {"database": "unavailable"},
+            "dependencies": {
+                "database": "unavailable",
+                "authentication_configuration": authentication_configuration,
+            },
         }
 
     return {
         "status": "ready",
-        "dependencies": {"database": "available"},
+        "dependencies": {
+            "database": "available",
+            "authentication_configuration": authentication_configuration,
+        },
     }

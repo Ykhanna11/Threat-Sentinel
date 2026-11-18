@@ -30,7 +30,10 @@ def test_readiness_reports_database_as_not_configured(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ready",
-        "dependencies": {"database": "not_configured"},
+        "dependencies": {
+            "database": "not_configured",
+            "authentication_configuration": "not_configured",
+        },
     }
 
 
@@ -49,5 +52,8 @@ def test_readiness_reports_database_failure(monkeypatch) -> None:
     assert response.status_code == 503
     assert response.json() == {
         "status": "not_ready",
-        "dependencies": {"database": "unavailable"},
+        "dependencies": {
+            "database": "unavailable",
+            "authentication_configuration": "not_configured",
+        },
     }
