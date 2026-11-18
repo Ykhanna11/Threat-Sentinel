@@ -6,7 +6,8 @@ This document defines engineering principles for future implementation. The curr
 - **Establish trust boundaries:** the HTTP bearer credential is untrusted input. Only a successful
   `JwtAccessTokenVerifier` call may produce `VerifiedAccessTokenClaims`; only local identity
   resolution of those claims may produce an `AuthenticatedPrincipal` for an active user. The
-  verifier is standalone and is not yet a request boundary.
+  reusable FastAPI dependency performs these steps separately and is not attached to product
+  routes.
   `VerifiedUserContext` remains an internal Phase 2A identity-service/tenancy contract, not proof
   of verification. Never construct trusted claims or principals from request data.
 - **Separate authorization:** a verified token and authenticated local principal do not themselves
@@ -36,15 +37,16 @@ This document defines engineering principles for future implementation. The curr
   untyped JWTs or ID tokens. Signature verification uses only configured asymmetric algorithms
   and matching public JWK types/curves; the token cannot select a key URL or key material.
 - **Keep verifier failures typed and private:** invalid credentials, unavailable trusted keys, and
-  unexpected verifier failures are distinct internal error types with generic messages. Future
-  HTTP dependencies must not expose signature, key-selection, issuer, audience, network, or parser
+  unexpected verifier failures are distinct internal error types. The FastAPI dependency maps
+  invalid credentials and inactive accounts to generic `401` responses, trusted JWKS failures to
+  generic `503` responses, and lets unexpected failures use the safe global `500` handler. It does
+  not expose signature, key-selection, issuer, audience, network, parser, or internal exception
   details to clients.
 - **Return safe authentication failures:** the verifier classifies invalid token cases as
   `InvalidAccessToken`, trusted JWKS failures as `TrustedKeySourceUnavailable`, and unexpected
-  verifier errors as `AuthenticationVerifierFailure`. Future request dependencies must not expose
-  token-validation details; HTTP status mapping, missing credentials, inactive users, and
-  authorization denial are not implemented yet. Operational failures must fail closed and must
-  never be reported as successful authentication.
+  verifier errors as `AuthenticationVerifierFailure`. Missing, malformed, unsupported, or empty
+  bearer credentials receive a generic `401` with a `WWW-Authenticate: Bearer` challenge.
+  Operational failures fail closed and are never reported as successful authentication.
 - **Authorize server-side:** the tenancy service requires an active local user and active database membership for the requested organization; an organization ID alone grants no access. Future protected routes must invoke this boundary and test cross-tenant denial.
 - **Own transactions explicitly:** request-scoped sessions are not implicitly committed. Mutations use `unit_of_work()` so success commits, exceptions roll back, and the session closes. Do not add blanket request-level commits.
 - **Keep identity provider-neutral:** internal users are linked to external identities by verified issuer and subject, not email. Only provider-asserted verified email metadata is recorded as verified. Provider organization roles/claims do not confer ThreatSentinel permissions.
@@ -57,15 +59,14 @@ This document defines engineering principles for future implementation. The curr
 - **Use defense in depth:** require dependency updates, code review, automated checks, secure transport, least privilege, backups, and incident-response procedures before production use.
 - **Test security boundaries:** add threat modeling, input abuse cases, authorization and tenant-isolation tests, and secret/log redaction checks alongside the relevant features.
 
-The repository now has a standalone JWT access-token verifier, typed internal access-token-claims
-contract, and local authenticated-principal resolution contract in addition to its identity,
-organization, membership, invitation persistence, service-level organization access checks,
-explicit unit-of-work boundary, and reusable owner-retention invariant. The claims and principal
-types do not perform or prove cryptographic verification by themselves. The verifier is not wired
-to authentication middleware/dependencies, authentication routes, or protected product routes.
-OIDC discovery, browser flows, membership mutation/owner transfer, invitation transition services,
-fine-grained permission enforcement, audit event storage, rate limiting, and production secrets
-integration remain unimplemented. These foundations are not a production security control set.
+The repository now has a standalone JWT access-token verifier and a reusable FastAPI authentication
+dependency that verifies bearer credentials and resolves active local principals in a short
+unit-of-work transaction. The dependency is not attached to authentication routes or protected
+product routes; health/readiness remain independent of provider configuration. The claims and
+principal types do not perform or prove cryptographic verification by themselves. OIDC discovery,
+browser flows, membership mutation/owner transfer, invitation transition services, fine-grained
+permission enforcement, audit event storage, rate limiting, and production secrets integration
+remain unimplemented. These foundations are not a production security control set.
 
 The verifier uses the configured JWKS URL directly; it does not perform OIDC discovery. The
 three-second connection/read timeouts, 64 KiB response limit, 30-second unknown-key refresh
