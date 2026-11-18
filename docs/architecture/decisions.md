@@ -7,7 +7,7 @@ These decisions are the approved foundation for the initial project scaffold. Th
 | Repository | Monorepo with `apps/web`, `apps/api`, `packages/shared-contracts`, infrastructure, docs, scripts, and tests. |
 | Frontend | Next.js App Router, strict TypeScript, Tailwind CSS, shadcn/ui-compatible component organization, and Lucide icons. |
 | Backend | Python with FastAPI, Pydantic Settings, SQLAlchemy 2.x, and Alembic. |
-| Database | PostgreSQL with SQLAlchemy 2.x and Alembic; the initial schema is limited to identity and organization tenancy foundations. |
+| Database | PostgreSQL is the architectural database direction. PostgreSQL 17 is the local and CI target for concurrency integration tests; no production provider has been selected. |
 | JavaScript packages | pnpm workspace. |
 | Python packages | uv project and lockfile. |
 | Testing | Vitest for frontend smoke tests, Pytest for API tests, and Playwright for browser-level testing. |
@@ -30,7 +30,7 @@ These decisions are the approved foundation for the initial project scaffold. Th
 - Future shared TypeScript contracts should describe API boundaries, not reimplement backend rules.
 - External identity resolution uses the exact `(issuer, subject)` pair. A previously unknown verified identity may create a local user and external identity mapping, but this provisioning creates no organization or membership. Organization creation explicitly grants the creator the initial owner membership.
 - Authentication verification, local identity resolution, and tenant authorization are separate reusable dependencies/contracts. No application product route currently mounts them.
-- The first planned product resource is a Website/Domain Security Scan. Its authorization policy below is architecture only; no scan model, repository, service, route, or scanning engine exists yet.
+- The first product resource is a Website/Domain Security Scan. Its model, scoped repository, and authorization-aware service exist; production routes and a scanning engine are not implemented.
 - `VerifiedUserContext` remains the Phase 2A issuer/subject and email-metadata contract used by
   existing identity and tenancy services; it is not a bearer credential or proof of token
   verification. The reusable authentication dependency produces `AuthenticatedPrincipal` only
@@ -76,7 +76,48 @@ Resource lookups must constrain resource ID and authorized scope together in the
 query. A missing resource and an out-of-scope resource return the same generic `404`; a caller
 with access to the scope but without permission for the action receives a generic `403`. Internal
 audit logging may distinguish denial reasons without disclosing them to clients. Sensitive
-authorization checks and resource operations require an appropriate transaction boundary to
-prevent membership-revocation races; the existing tenant dependency transaction must be
-reconsidered when product operations are implemented. No role hierarchy, implicit permission
-inheritance, or authorization caching is used initially.
+authorization checks and resource operations require the approved transaction and concurrency
+protocol below; a shared transaction alone does not prevent membership-revocation races. No role
+hierarchy, implicit permission inheritance, or authorization caching is used initially.
+
+### Approved transaction and concurrency protocol (implementation pending)
+
+This is an approved design, not an implemented or PostgreSQL-validated guarantee. PostgreSQL 17 is
+the target for local and CI concurrency integration tests; the production database provider and
+its runtime settings remain unselected. Do not change transaction isolation as part of this
+protocol.
+
+All authorization-sensitive operations acquire row locks in this order:
+
+1. User rows, sorted by UUID.
+2. The organization row, when applicable.
+3. Invitation rows, sorted by UUID, when applicable.
+4. Membership rows, sorted by UUID.
+
+Scan-side authorization reads use PostgreSQL `FOR SHARE`. Authorization-state writers use
+`FOR NO KEY UPDATE`, acquired before reading or validating the state to be changed. Hold locks
+until the transaction commits or rolls back. Do not acquire these record types in a different
+order.
+
+The organization row is the serialization point for organization membership operations. This is
+required because an absent membership row cannot be locked. Membership creation, restoration,
+removal, suspension, role changes, and active-owner retention checks must use the same
+organization-first protocol when implemented.
+
+All six existing `ScanService` operations must eventually acquire their applicable user,
+organization, and membership locks within their existing single unit of work. Preserve the
+approved role/action policy, local user and membership status checks, locally stored roles,
+scope-constrained scan queries, generic not-found behavior, and existing database constraints.
+The existing organization-creation operation must eventually make active-user validation and
+organization/initial-owner creation participate in the same transaction and locking protocol.
+
+Future user suspension/deactivation, organization suspension/archive, membership changes,
+invitation transitions, ownership transfer, and identity unlink/relink must adopt this protocol
+before their workflows are exposed. These lifecycle workflows are not created by this decision.
+
+Do not introduce automatic retries initially or choose arbitrary lock-timeout values. A deadlock
+or lock-timeout failure must roll back the entire transaction and must not be reported as an
+authorization denial. Do not hold authorization locks during network requests or lengthy scan
+execution. Row-lock behavior is runtime transaction behavior; no migration is required for this
+protocol. Do not expose organization scan operations through production routes until the locks
+are implemented and validated against PostgreSQL.

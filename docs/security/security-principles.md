@@ -77,9 +77,11 @@ This document defines engineering principles for future implementation. The curr
 - **Test security boundaries:** add threat modeling, input abuse cases, authorization and tenant-isolation tests, and secret/log redaction checks alongside the relevant features.
 
 Initially, do not introduce role hierarchies, implicit permission inheritance, or authorization
-caching. Protect sensitive authorization checks and resource operations with an appropriate
-transaction boundary to prevent membership-revocation races. The existing tenant dependency's
-transaction boundary must be reconsidered when actual product operations are implemented.
+caching. A shared transaction alone does not prevent membership-revocation races. The approved
+row-lock protocol is documented in the
+[architecture decision](../architecture/decisions.md#approved-transaction-and-concurrency-protocol-implementation-pending);
+it remains unimplemented and requires PostgreSQL validation before organization scan operations
+are exposed through production routes.
 
 The repository now has a standalone JWT access-token verifier, a reusable FastAPI authentication
 dependency, and a reusable tenant membership dependency. The tenant dependency uses the existing

@@ -72,22 +72,24 @@ These are application and persistence foundations, not a complete authentication
 
 ## Planned authorization for the first product resource
 
-The first planned resource is a Website/Domain Security Scan; its model, service, routes, and
-scanning engine are not implemented. A scan will belong to one logical scope: either a personal
-workspace or an organization workspace. Personal scans are owned by the authenticated principal
-assigned by the server; authenticated users may create personal scans and list/read only their own.
-Personal scans do not require organization membership. Organization scans require an active local
-user, active organization, and active local membership and use the local membership role policy.
+The first resource is a Website/Domain Security Scan. Its model, scoped repository, and
+authorization-aware service are implemented; production routes and a scanning engine are not. A
+scan belongs to one logical scope: either a personal workspace or an organization workspace.
+Personal scans are owned by the authenticated principal assigned by the server; authenticated
+users may create personal scans and list/read only their own. Personal scans do not require
+organization membership. Organization scans require an active local user, active organization,
+and active local membership and use the local membership role policy.
 The approved matrix allows `OWNER`, `ADMIN`, and `MEMBER` to create
 organization scans, while `VIEWER` cannot; all four roles may read and list organization scans.
 No other actions are approved. See the [authorization decision](./decisions.md#initial-website-domain-security-scan-authorization-planned)
 for the complete matrix and denial/transaction rules.
 
-The server determines ownership and scope. Data access must constrain resource ID and authorized
-scope together; a missing resource and an out-of-scope resource return the same generic `404`.
-Permission denial for an in-scope resource returns a generic `403`. Authorization checks and
-sensitive operations must share an appropriate transaction boundary to address membership changes
-after a check. These are planned rules, not implemented product behavior.
+The server determines ownership and scope. Data access constrains resource ID and authorized scope
+together; a missing resource and an out-of-scope resource return the same generic `404`. Permission
+denial for an in-scope resource returns a generic `403`. The service performs authorization and
+scan access in one unit of work, but the approved row-lock protocol needed to serialize concurrent
+authorization-state changes is not implemented or PostgreSQL-validated. See the
+[approved transaction and concurrency protocol](./decisions.md#approved-transaction-and-concurrency-protocol-implementation-pending).
 
 ## Design direction
 
