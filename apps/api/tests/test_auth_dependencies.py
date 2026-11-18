@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Annotated, cast
+from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from threat_sentinel_api import main as api_main
 from threat_sentinel_api.api import dependencies as auth_dependencies
+from threat_sentinel_api.core.config import Settings
 from threat_sentinel_api.db import session as database_session
 from threat_sentinel_api.modules.identity.auth_errors import (
     AuthenticationVerifierFailure,
@@ -108,6 +110,78 @@ def _bind_test_unit_of_work(
         "unit_of_work",
         partial(database_session.unit_of_work, session_factory),
     )
+
+
+@pytest.fixture
+def auth_provider_cache() -> Iterator[None]:
+    auth_dependencies.get_authentication_provider.cache_clear()
+    yield
+    auth_dependencies.get_authentication_provider.cache_clear()
+
+
+def test_missing_authentication_configuration_returns_safe_service_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_provider_cache: None,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        auth_expected_issuer=None,
+        auth_expected_audience=None,
+        auth_trusted_jwks_url=None,
+        auth_allowed_jwt_algorithms=None,
+    )
+    monkeypatch.setattr(auth_dependencies, "get_settings", lambda: settings)
+    verifier_constructor = Mock(side_effect=AssertionError("Verifier construction must not occur"))
+    monkeypatch.setattr(auth_dependencies, "JwtAccessTokenVerifier", verifier_constructor)
+    bearer_token = "raw-bearer-token-sentinel"
+
+    response = client.get(
+        "/protected",
+        headers={"Authorization": f"Bearer {bearer_token}"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "http_error",
+            "message": "The request could not be completed.",
+        }
+    }
+    verifier_constructor.assert_not_called()
+    for sensitive_value in (
+        bearer_token,
+        "issuer",
+        "audience",
+        "jwks",
+        "environment",
+        "secret",
+    ):
+        assert sensitive_value not in response.text
+
+
+def test_complete_authentication_configuration_initializes_and_caches_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+    auth_provider_cache: None,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        auth_expected_issuer="https://issuer.example",
+        auth_expected_audience="threat-sentinel-api",
+        auth_trusted_jwks_url="https://issuer.example/keys",
+        auth_allowed_jwt_algorithms=["RS256"],
+    )
+    provider = Mock(spec=AuthenticationProvider)
+    verifier_constructor = Mock(return_value=provider)
+    monkeypatch.setattr(auth_dependencies, "get_settings", lambda: settings)
+    monkeypatch.setattr(auth_dependencies, "JwtAccessTokenVerifier", verifier_constructor)
+
+    first = auth_dependencies.get_authentication_provider()
+    second = auth_dependencies.get_authentication_provider()
+
+    assert first is provider
+    assert second is provider
+    verifier_constructor.assert_called_once_with(settings)
 
 
 @pytest.mark.parametrize(

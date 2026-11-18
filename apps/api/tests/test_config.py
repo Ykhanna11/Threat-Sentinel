@@ -27,6 +27,7 @@ def test_settings_load_without_authentication_configuration() -> None:
     assert settings.auth_expected_audience is None
     assert settings.auth_trusted_jwks_url is None
     assert settings.auth_allowed_jwt_algorithms is None
+    assert settings.authentication_configured is False
 
 
 def test_valid_authentication_configuration_is_preserved() -> None:
@@ -36,6 +37,7 @@ def test_valid_authentication_configuration_is_preserved() -> None:
     assert settings.auth_expected_audience == "threat-sentinel-api"
     assert settings.auth_trusted_jwks_url == "https://issuer.example/keys"
     assert settings.auth_allowed_jwt_algorithms == ["RS256", "ES256"]
+    assert settings.authentication_configured is True
     assert settings.auth_clock_skew_seconds == 30
     assert settings.auth_jwks_cache_ttl_seconds == 300
     assert settings.auth_jwks_cache_max_entries == 16
