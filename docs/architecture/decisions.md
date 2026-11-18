@@ -17,7 +17,7 @@ These decisions are the approved foundation for the initial project scaffold. Th
 | Service topology | A modular monolith until demonstrated scaling or operational requirements justify extraction. No Kubernetes or speculative microservices. |
 | Identity key | Internal users have stable UUIDs; external accounts map by the exact verified `(issuer, subject)` pair. Email is mutable metadata, not an account key or linking mechanism. |
 | Authentication boundary | Keep untrusted bearer credentials, verifier-produced access-token claims, resolved local application identity, and authorization decisions separate. The provider-neutral adapter returns only the minimal typed verified claims; local identity resolution produces a principal only for an active user. Issuer, audience, JWKS URL, and allowed algorithms are trusted out-of-band settings and must be configured together. JWT verification and reusable FastAPI authentication and tenant dependencies are implemented, but no application product route currently consumes them. |
-| Tenant authorization | Organizations and memberships are application-owned database records. Access requires an active local user, organization, and membership; identity-provider organization roles/claims do not grant application permissions. |
+| Tenant authorization | Authorization uses local user identity, active local membership, locally assigned organization role, and resource scope. Provider-supplied roles, permissions, or organization claims never grant local access. Suspended users, organizations, and memberships are denied. No role hierarchy, implicit permission inheritance, or authorization caching is introduced initially. |
 | Transaction ownership | Request-scoped `get_session()` does not commit implicitly. Mutating application operations own a transaction and cleanup through `unit_of_work()`. |
 | Invitations | A partial unique index permits only one pending invitation per organization and normalized email; terminal invitations may be reissued. Invitations can reference only a membership in the same organization. No delivery or bearer-token mechanism is implemented. |
 | Owner retention | Projected membership changes must retain an active owner. A reusable domain invariant exists, but no membership mutation or ownership-transfer operations are implemented. |
@@ -30,6 +30,7 @@ These decisions are the approved foundation for the initial project scaffold. Th
 - Future shared TypeScript contracts should describe API boundaries, not reimplement backend rules.
 - External identity resolution uses the exact `(issuer, subject)` pair. A previously unknown verified identity may create a local user and external identity mapping, but this provisioning creates no organization or membership. Organization creation explicitly grants the creator the initial owner membership.
 - Authentication verification, local identity resolution, and tenant authorization are separate reusable dependencies/contracts. No application product route currently mounts them.
+- The first planned product resource is a Website/Domain Security Scan. Its authorization policy below is architecture only; no scan model, repository, service, route, or scanning engine exists yet.
 - `VerifiedUserContext` remains the Phase 2A issuer/subject and email-metadata contract used by
   existing identity and tenancy services; it is not a bearer credential or proof of token
   verification. The reusable authentication dependency produces `AuthenticatedPrincipal` only
@@ -53,3 +54,29 @@ These decisions are the approved foundation for the initial project scaffold. Th
 - Repository/service writes must be grouped in `unit_of_work()`; request session cleanup does not imply a commit.
 - Persistence models are internal and must not be exposed directly as public API response contracts.
 - Product security and privacy decisions must precede collection or processing of user-provided threat evidence.
+
+### Initial Website/Domain Security Scan authorization (planned)
+
+Each scan belongs to exactly one logical access scope: a personal workspace or an organization
+workspace. The creator/audit identity is distinct from the authorization scope. The server assigns
+the owner of a personal scan from the authenticated principal; client-supplied owner IDs never
+establish ownership. Authenticated users may create personal scans and may list/read only their own;
+personal scans do not require organization membership.
+
+Organization scans require an active local user, active organization, and active local membership.
+Only the following initial actions are approved; role names do not imply any additional permissions:
+
+| Action | OWNER | ADMIN | MEMBER | VIEWER |
+| --- | --- | --- | --- | --- |
+| Create organization scan | Allow | Allow | Allow | Deny |
+| Read organization scan | Allow | Allow | Allow | Allow |
+| List organization scans | Allow | Allow | Allow | Allow |
+
+Resource lookups must constrain resource ID and authorized scope together in the data-access
+query. A missing resource and an out-of-scope resource return the same generic `404`; a caller
+with access to the scope but without permission for the action receives a generic `403`. Internal
+audit logging may distinguish denial reasons without disclosing them to clients. Sensitive
+authorization checks and resource operations require an appropriate transaction boundary to
+prevent membership-revocation races; the existing tenant dependency transaction must be
+reconsidered when product operations are implemented. No role hierarchy, implicit permission
+inheritance, or authorization caching is used initially.

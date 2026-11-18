@@ -60,7 +60,7 @@ The API currently exposes only liveness and readiness checks. The database URL r
   addresses while retaining TLS hostname verification, does not follow redirects, uses three
   second connection/read timeouts, limits JWKS responses to 64 KiB, and caps cached keys using
   configuration. Refreshes are throttled, including requests for unknown key IDs.
-- `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial coarse roles; fine-grained and custom permission policies remain future work.
+- `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial coarse roles; scan-specific and fine-grained/custom permission enforcement remains future work.
 - `OrganizationService` requires a `VerifiedUserContext`, resolves it to a local user by issuer and subject, then checks the active organization and membership in the database. A caller-supplied organization UUID alone is not an authorization check. Provider organization roles or claims are not consumed as application permissions.
 - Pending invitations have a database-enforced unique key per organization and normalized email (lowercase and trimmed); terminal invitations do not block reissue. Invitation delivery and state-transition endpoints are not implemented.
 - `get_session()` is a request-scoped session resource, not a commit boundary. Mutating application operations must run inside `unit_of_work()`, which owns commit on success, rollback on exceptions, and session closure.
@@ -69,6 +69,25 @@ The API currently exposes only liveness and readiness checks. The database URL r
 These are application and persistence foundations, not a complete authentication or authorization system. No application product route currently consumes the authentication or tenant dependencies. A verified external token produces verified claims; local identity resolution produces an authenticated principal; the tenant dependency produces a scoped active-organization context after checking local membership. Future product routes must explicitly consume the appropriate dependency.
 
 `packages/shared-contracts` is an intentionally empty starting point for future shared API contracts. It must not become a copy of backend business logic.
+
+## Planned authorization for the first product resource
+
+The first planned resource is a Website/Domain Security Scan; its model, service, routes, and
+scanning engine are not implemented. A scan will belong to one logical scope: either a personal
+workspace or an organization workspace. Personal scans are owned by the authenticated principal
+assigned by the server; authenticated users may create personal scans and list/read only their own.
+Personal scans do not require organization membership. Organization scans require an active local
+user, active organization, and active local membership and use the local membership role policy.
+The approved matrix allows `OWNER`, `ADMIN`, and `MEMBER` to create
+organization scans, while `VIEWER` cannot; all four roles may read and list organization scans.
+No other actions are approved. See the [authorization decision](./decisions.md#initial-website-domain-security-scan-authorization-planned)
+for the complete matrix and denial/transaction rules.
+
+The server determines ownership and scope. Data access must constrain resource ID and authorized
+scope together; a missing resource and an out-of-scope resource return the same generic `404`.
+Permission denial for an in-scope resource returns a generic `403`. Authorization checks and
+sensitive operations must share an appropriate transaction boundary to address membership changes
+after a check. These are planned rules, not implemented product behavior.
 
 ## Design direction
 
