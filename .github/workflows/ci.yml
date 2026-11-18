@@ -39,6 +39,19 @@ jobs:
   backend:
     name: Backend quality and tests
     runs-on: ubuntu-latest
+    services:
+      postgres-test:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: threatsentinel_test
+          POSTGRES_USER: threatsentinel_test
+          POSTGRES_PASSWORD: integration-test-only
+        options: >-
+          --health-cmd "pg_isready -U threatsentinel_test -d threatsentinel_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+          --health-start-period 5s
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10
@@ -50,4 +63,8 @@ jobs:
       - run: uv run --directory apps/api --project . ruff check
       - run: uv run --directory apps/api --project . ruff format --check
       - run: uv run --directory apps/api --project . mypy
-      - run: uv run --directory apps/api --project . pytest
+      - run: uv run --directory apps/api --project . pytest -m "not postgres_integration"
+      - name: PostgreSQL integration tests
+        env:
+          THREAT_SENTINEL_TEST_DATABASE_URL: postgresql+psycopg://threatsentinel_test:integration-test-only@postgres-test:5432/threatsentinel_test
+        run: uv run --directory apps/api --project . pytest -m postgres_integration

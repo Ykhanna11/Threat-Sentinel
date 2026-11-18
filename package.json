@@ -16,7 +16,7 @@
     "lint": "pnpm --filter @threat-sentinel/web lint",
     "typecheck": "pnpm --filter @threat-sentinel/web typecheck",
     "test:web": "pnpm --filter @threat-sentinel/web test",
-    "test:api": "uv run --directory apps/api --project . pytest",
+    "test:api": "uv run --directory apps/api --project . pytest -m \"not postgres_integration\"",
     "test:e2e": "pnpm --filter @threat-sentinel/web test:e2e",
     "validate": "python scripts/validate_project.py"
   }

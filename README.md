@@ -75,6 +75,42 @@ uv run --directory apps/api --project . alembic upgrade head
 
 Identity and tenancy are not exposed through product API routes yet.
 
+## PostgreSQL integration tests
+
+The ordinary API suite uses in-memory SQLite. PostgreSQL integration tests are separately marked
+and require an explicitly configured disposable PostgreSQL 17 database; they never fall back to
+`DATABASE_URL` or `.env`.
+
+Start the isolated local test service. It uses a test-only database and credentials, binds only
+to loopback port `55432`, and stores its data in temporary memory rather than the development
+database volume:
+
+```bash
+docker compose -p threatsentinel-postgres-test \
+  -f infrastructure/docker/compose.postgres-test.yaml up -d --wait
+export THREAT_SENTINEL_TEST_DATABASE_URL='postgresql+psycopg://threatsentinel_test:local-test-only@localhost:55432/threatsentinel_test'
+```
+
+Run the PostgreSQL integration marker. Its session-scoped fixture applies the existing Alembic
+migrations to the configured test database before executing marked tests:
+
+```bash
+uv run --directory apps/api --project . pytest -m postgres_integration
+```
+
+Stop and remove only the isolated test Compose project and its resources:
+
+```bash
+docker compose -p threatsentinel-postgres-test \
+  -f infrastructure/docker/compose.postgres-test.yaml down --volumes --remove-orphans
+unset THREAT_SENTINEL_TEST_DATABASE_URL
+```
+
+Do not use the development Compose project, its persistent volume, or the normal `DATABASE_URL`
+for these tests. The test URL is accepted only for the designated test database, user, local test
+port, or the CI test service hostname. CI provides its own ephemeral PostgreSQL 17 service and
+runs the marked tests separately from the SQLite suite.
+
 ## Checks and tests
 
 ```bash

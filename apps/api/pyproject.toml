@@ -33,6 +33,9 @@ packages = ["src/threat_sentinel_api"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+markers = [
+    "postgres_integration: requires the dedicated disposable PostgreSQL 17 test database",
+]
 
 [tool.ruff]
 line-length = 100
