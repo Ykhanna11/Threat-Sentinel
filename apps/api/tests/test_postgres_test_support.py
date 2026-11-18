@@ -40,7 +40,7 @@ def test_validated_test_url_requires_the_dedicated_driver_and_target(host: str, 
         "postgresql+psycopg2://threatsentinel_test:test-secret@localhost:55432/threatsentinel_test",
         "postgresql+psycopg://threatsentinel:dev-secret@localhost:5432/threatsentinel",
         "postgresql+psycopg://threatsentinel_test:test-secret@db.example:5432/threatsentinel_test",
-        "postgresql+psycopg://threatsentinel_test:test-secret@localhost:5432/threatsentinel_test",
+        "postgresql+psycopg://threatsentinel_test:test-secret@127.0.0.1:5432/threatsentinel_test",
         "postgresql+psycopg://threatsentinel_test@test-secret@localhost:55432/threatsentinel_test",
         "postgresql+psycopg://threatsentinel_test:test-secret@localhost:55432/"
         "threatsentinel_test?host=production.example",

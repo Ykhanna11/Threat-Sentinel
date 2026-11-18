@@ -8,7 +8,7 @@ TEST_DATABASE_ENV = "THREAT_SENTINEL_TEST_DATABASE_URL"
 TEST_DATABASE_NAME = "threatsentinel_test"
 TEST_DATABASE_USER = "threatsentinel_test"
 LOCAL_TEST_DATABASE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-CI_TEST_DATABASE_HOST = "postgres-test"
+CI_TEST_DATABASE_HOST = "localhost"
 
 
 def validate_postgres_test_database_url(value: str) -> URL:
