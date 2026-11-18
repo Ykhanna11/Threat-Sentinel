@@ -49,7 +49,7 @@ pnpm dev:api
 
 The API is available at <http://127.0.0.1:8000>; interactive API documentation is at <http://127.0.0.1:8000/docs>. Liveness and readiness endpoints are `GET /api/v1/health` and `GET /api/v1/ready`.
 
-The API starts without a database URL. Readiness reports the database as `not_configured`; when `DATABASE_URL` is set, readiness checks the connection and returns `503` if it is unavailable. The current API has no database-dependent product routes.
+Liveness is independent of database and authentication configuration. Readiness reports the database status and `authentication_configuration` (`configured` or `not_configured`). When `DATABASE_URL` is set, readiness checks the database connection and returns `503` if it is unavailable. Authentication configuration status reflects only whether the required local settings are complete; readiness does not initialize the JWT verifier or JWKS infrastructure and does not verify provider reachability, token validity, or whether protected product routes exist. The current API has no database-dependent or authentication-protected product routes.
 
 ## Local PostgreSQL
 

@@ -40,10 +40,10 @@ This document defines engineering principles for future implementation. The curr
   and matching public JWK types/curves; the token cannot select a key URL or key material.
 - **Keep verifier failures typed and private:** invalid credentials, unavailable trusted keys, and
   unexpected verifier failures are distinct internal error types. The FastAPI dependency maps
-  invalid credentials and inactive accounts to generic `401` responses, trusted JWKS failures to
-  generic `503` responses, and lets unexpected failures use the safe global `500` handler. It does
-  not expose signature, key-selection, issuer, audience, network, parser, or internal exception
-  details to clients.
+  missing or invalid credentials and inactive accounts to generic `401` responses, missing local
+  authentication configuration and trusted JWKS failures to generic `503` responses, and lets
+  unexpected failures use the safe global `500` handler. It does not expose signature,
+  key-selection, issuer, audience, network, parser, or internal exception details to clients.
 - **Return safe authentication failures:** the verifier classifies invalid token cases as
   `InvalidAccessToken`, trusted JWKS failures as `TrustedKeySourceUnavailable`, and unexpected
   verifier errors as `AuthenticationVerifierFailure`. Missing, malformed, unsupported, or empty
@@ -63,17 +63,25 @@ This document defines engineering principles for future implementation. The curr
 
 The repository now has a standalone JWT access-token verifier, a reusable FastAPI authentication
 dependency, and a reusable tenant membership dependency. The tenant dependency uses the existing
-active membership check in a short unit-of-work transaction; it is not attached to product routes,
-and health/readiness remain independent of provider configuration. The claims and principal types
-do not perform or prove cryptographic verification by themselves. OIDC discovery, browser flows,
-membership mutation/owner transfer, invitation transition services, fine-grained permission
-enforcement, audit event storage, rate limiting, and production secrets integration remain
-unimplemented. These foundations are not a production security control set.
+active membership check in a short unit-of-work transaction; it is not attached to product routes.
+Liveness remains independent of database and authentication configuration. Readiness reports
+database status and local authentication-configuration completeness, but does not initialize the
+verifier or probe live provider/JWKS availability. A previously unknown external identity may
+create a local user and external identity mapping after successful verification; that provisioning
+does not create an organization
+or membership. Inactive local users are rejected, and organization access still requires an
+independently established active local membership. Provider roles and organization claims do not
+grant local authorization. The claims and principal types do not perform or prove cryptographic
+verification by themselves. OIDC discovery, browser login/logout, refresh sessions, session
+revocation, invitation delivery, membership mutation/owner transfer, RBAC and fine-grained
+permission enforcement, audit event storage, rate limiting, and production secrets integration
+remain unimplemented. These foundations are not a production security control set.
 
 The verifier uses the configured JWKS URL directly; it does not perform OIDC discovery. The
 three-second connection/read timeouts, 64 KiB response limit, 30-second unknown-key refresh
 interval, and five-second minimum refresh interval are implementation safeguards, not configurable
-values. Authentication/session lifecycle, revocation, onboarding of unknown identities, and any
-browser flow are deferred.
+values. Authentication/session lifecycle, revocation, browser account-onboarding flows, and any
+browser login flow are deferred. Identity-record provisioning for a successfully verified unknown
+issuer/subject pair is implemented separately and does not create organization membership.
 No frontend authentication flow is to be introduced before the backend verification and
 authorization trust boundaries are implemented and tested.

@@ -30,7 +30,7 @@ The API currently exposes only liveness and readiness checks. The database URL r
 ## Identity and tenant boundaries
 
 - `User` is an internal account with a stable UUID. `ExternalIdentity` maps a verified provider issuer and subject to that account; the `(issuer, subject)` pair is unique. Email is optional metadata, and a verified email is never used to merge accounts or identify a user.
-- `VerifiedAccessTokenClaims` is a minimal, immutable internal contract for output from a future
+- `VerifiedAccessTokenClaims` is a minimal, immutable internal contract for output from a
   successful verifier; it requires issuer, subject, audience, issuance time, and expiration, and
   excludes the bearer token and arbitrary provider claims. `AuthenticationProvider` is only a
   provider-neutral protocol and now returns this type. The type does not itself verify a token.
@@ -43,12 +43,19 @@ The API currently exposes only liveness and readiness checks. The database URL r
   token verification. `IdentityService.resolve_authenticated_principal()` resolves verified
   claims to an active local user and returns an immutable `AuthenticatedPrincipal` containing
   local and external identity IDs. That principal is not an authorization grant.
+- When a successfully verified issuer/subject pair is not known locally, identity resolution may
+  create a local user and external identity mapping. This does not create an organization or
+  membership; access still requires a separately established active local membership.
 - `JwtAccessTokenVerifier` validates compact JWTs whose protected header has `typ: at+jwt`.
   It validates signatures only with compatible keys from the configured JWKS endpoint and only
   with configured asymmetric algorithms; issuer, audience, required time claims, subject, and
-  optional email metadata are validated before returning `VerifiedAccessTokenClaims`. The
-  standalone verifier is not wired to API routes or dependencies. OIDC discovery and login flows
-  are not implemented.
+  optional email metadata are validated before returning `VerifiedAccessTokenClaims`.
+  `get_current_principal` is a reusable FastAPI dependency that uses the provider to verify a
+  bearer credential and resolves the claims to an active local identity. The reusable tenant
+  dependency returns an `ActiveOrganizationContext` only after checking active local membership.
+  No application product route currently mounts either dependency; the API router currently
+  mounts health routes only. Authentication configuration is optional for this health-only API.
+  OIDC discovery and login flows are not implemented.
 - `TrustedJwksKeyStore` rejects non-public DNS answers, pins HTTPS connections to validated IP
   addresses while retaining TLS hostname verification, does not follow redirects, uses three
   second connection/read timeouts, limits JWKS responses to 64 KiB, and caps cached keys using
@@ -59,7 +66,7 @@ The API currently exposes only liveness and readiness checks. The database URL r
 - `get_session()` is a request-scoped session resource, not a commit boundary. Mutating application operations must run inside `unit_of_work()`, which owns commit on success, rollback on exceptions, and session closure.
 - `require_active_owner()` validates a projected membership state before a future role/removal operation. Membership changes, owner transfer/removal rules, invitation state-transition services, and automatic enforcement that an organization retain an active owner are not implemented; call the invariant from such operations before exposing management endpoints.
 
-These are application and persistence foundations, not a complete authentication or authorization system. No protected HTTP route currently consumes these services.
+These are application and persistence foundations, not a complete authentication or authorization system. No application product route currently consumes the authentication or tenant dependencies. A verified external token produces verified claims; local identity resolution produces an authenticated principal; the tenant dependency produces a scoped active-organization context after checking local membership. Future product routes must explicitly consume the appropriate dependency.
 
 `packages/shared-contracts` is an intentionally empty starting point for future shared API contracts. It must not become a copy of backend business logic.
 
@@ -74,4 +81,4 @@ These are application and persistence foundations, not a complete authentication
 
 ## Planned, not implemented
 
-Authentication routes/dependencies, OIDC discovery and browser flows, invitation delivery and acceptance, fine-grained permissions, detection, risk assessment, AI inference, investigations, intelligence feeds, billing, developer integrations, security audit storage, and production deployment are future capabilities. The identity and tenancy records and service boundaries described above are implemented foundations, not completed product capabilities.
+Authentication and tenant dependencies are reusable foundations, but protected product routes, OIDC discovery and browser flows, invitation delivery and acceptance, fine-grained permissions, detection, risk assessment, AI inference, investigations, intelligence feeds, billing, developer integrations, security audit storage, and production deployment are future capabilities. The identity and tenancy records and service boundaries described above are implemented foundations, not completed product capabilities.
