@@ -5,7 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from threat_sentinel_api.modules.identity.models import User
-from threat_sentinel_api.modules.tenants.models import Organization, OrganizationMembership
+from threat_sentinel_api.modules.tenants.models import (
+    Organization,
+    OrganizationInvitation,
+    OrganizationMembership,
+)
 
 
 def lock_user_for_share(session: Session, user_id: UUID) -> User | None:
@@ -28,6 +32,15 @@ def lock_user_for_no_key_update(session: Session, user_id: UUID) -> User | None:
         .execution_options(populate_existing=True)
     )
     return session.scalar(statement)
+
+
+def lock_users_for_no_key_update(session: Session, user_ids: Iterable[UUID]) -> list[User]:
+    users: list[User] = []
+    for user_id in sorted(set(user_ids)):
+        user = lock_user_for_no_key_update(session, user_id)
+        if user is not None:
+            users.append(user)
+    return users
 
 
 def lock_organization_for_share(session: Session, organization_id: UUID) -> Organization | None:
@@ -120,3 +133,79 @@ def lock_membership_by_id_for_share(
         .execution_options(populate_existing=True)
     )
     return session.scalar(statement)
+
+
+def lock_membership_by_id_for_no_key_update(
+    session: Session,
+    membership_id: UUID,
+    organization_id: UUID,
+) -> OrganizationMembership | None:
+    statement = (
+        select(OrganizationMembership)
+        .where(
+            OrganizationMembership.id == membership_id,
+            OrganizationMembership.organization_id == organization_id,
+        )
+        .with_for_update(key_share=True, of=OrganizationMembership)
+        .execution_options(populate_existing=True)
+    )
+    return session.scalar(statement)
+
+
+def lock_memberships_for_no_key_update(
+    session: Session,
+    organization_id: UUID,
+) -> list[OrganizationMembership]:
+    membership_ids = session.scalars(
+        select(OrganizationMembership.id)
+        .where(OrganizationMembership.organization_id == organization_id)
+        .order_by(OrganizationMembership.id)
+    ).all()
+    memberships: list[OrganizationMembership] = []
+    for membership_id in membership_ids:
+        membership = lock_membership_by_id_for_no_key_update(
+            session,
+            membership_id,
+            organization_id,
+        )
+        if membership is not None:
+            memberships.append(membership)
+    return memberships
+
+
+def lock_invitation_by_id_for_no_key_update(
+    session: Session,
+    invitation_id: UUID,
+    organization_id: UUID,
+) -> OrganizationInvitation | None:
+    statement = (
+        select(OrganizationInvitation)
+        .where(
+            OrganizationInvitation.id == invitation_id,
+            OrganizationInvitation.organization_id == organization_id,
+        )
+        .with_for_update(key_share=True, of=OrganizationInvitation)
+        .execution_options(populate_existing=True)
+    )
+    return session.scalar(statement)
+
+
+def lock_invitations_for_no_key_update(
+    session: Session,
+    organization_id: UUID,
+) -> list[OrganizationInvitation]:
+    invitation_ids = session.scalars(
+        select(OrganizationInvitation.id)
+        .where(OrganizationInvitation.organization_id == organization_id)
+        .order_by(OrganizationInvitation.id)
+    ).all()
+    invitations: list[OrganizationInvitation] = []
+    for invitation_id in invitation_ids:
+        invitation = lock_invitation_by_id_for_no_key_update(
+            session,
+            invitation_id,
+            organization_id,
+        )
+        if invitation is not None:
+            invitations.append(invitation)
+    return invitations

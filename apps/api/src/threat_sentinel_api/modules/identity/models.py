@@ -1,7 +1,17 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, UniqueConstraint, Uuid, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from threat_sentinel_api.db.base import Base
@@ -12,8 +22,15 @@ from threat_sentinel_api.modules.identity.enums import UserStatus
 
 class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "users"
-    __table_args__ = (Index("ix_users_status", "status"),)
+    __table_args__ = (
+        CheckConstraint(
+            "display_name IS NULL OR length(trim(display_name)) > 0",
+            name="ck_users_display_name_not_blank",
+        ),
+        Index("ix_users_status", "status"),
+    )
 
+    display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[UserStatus] = mapped_column(
         Enum(
             UserStatus,

@@ -14,8 +14,14 @@ from threat_sentinel_api.core.logging import configure_logging, get_logger
 from threat_sentinel_api.modules.identity.service import InvalidPrincipalError
 from threat_sentinel_api.modules.scans.service import ScanNotFound
 from threat_sentinel_api.modules.tenants.service import (
+    OrganizationConflict,
     OrganizationPermissionDenied,
     OrganizationScopeUnavailable,
+)
+from threat_sentinel_api.modules.tenants.invariants import ActiveOwnerRetentionError
+from threat_sentinel_api.modules.tenants.lifecycle_service import (
+    InvitationUnavailable,
+    MembershipNotFound,
 )
 
 logger = get_logger(__name__)
@@ -135,6 +141,31 @@ async def organization_permission_denied_handler(
     _exc: OrganizationPermissionDenied,
 ) -> JSONResponse:
     return _authorization_error_response(403)
+
+
+@app.exception_handler(OrganizationConflict)
+async def organization_conflict_handler(
+    _: Request,
+    _exc: OrganizationConflict,
+) -> JSONResponse:
+    return _authorization_error_response(409)
+
+
+@app.exception_handler(ActiveOwnerRetentionError)
+async def active_owner_retention_handler(
+    _: Request,
+    _exc: ActiveOwnerRetentionError,
+) -> JSONResponse:
+    return _authorization_error_response(409)
+
+
+@app.exception_handler(MembershipNotFound)
+@app.exception_handler(InvitationUnavailable)
+async def lifecycle_resource_unavailable_handler(
+    _: Request,
+    _exc: Exception,
+) -> JSONResponse:
+    return _authorization_error_response(404)
 
 
 @app.exception_handler(InvalidPrincipalError)

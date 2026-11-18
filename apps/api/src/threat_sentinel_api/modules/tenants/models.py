@@ -172,6 +172,12 @@ class OrganizationInvitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             ["organization_memberships.organization_id", "organization_memberships.id"],
             name="fk_org_invitations_membership_same_org",
         ),
+        ForeignKeyConstraint(
+            ["intended_identity_id"],
+            ["external_identities.id"],
+            name="fk_org_invitations_intended_identity",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint(
             "accepted_membership_id",
             name="uq_organization_invitations_accepted_membership",
@@ -190,8 +196,24 @@ class OrganizationInvitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             name="ck_organization_invitations_accepted_relationship",
         ),
         CheckConstraint(
+            "status != 'pending' OR token_hash IS NOT NULL",
+            name="ck_organization_invitations_pending_token_hash",
+        ),
+        CheckConstraint(
+            "status != 'pending' OR intended_identity_id IS NOT NULL",
+            name="ck_organization_invitations_pending_identity",
+        ),
+        CheckConstraint(
+            "role != 'owner'",
+            name="ck_organization_invitations_cannot_grant_owner",
+        ),
+        CheckConstraint(
             "status != 'revoked' OR revoked_at IS NOT NULL",
             name="ck_organization_invitations_revoked_timestamp",
+        ),
+        CheckConstraint(
+            "token_hash IS NULL OR length(token_hash) = 64",
+            name="ck_organization_invitations_token_hash_length",
         ),
         Index("ix_organization_invitations_organization_status", "organization_id", "status"),
         Index("ix_organization_invitations_expires_at", "expires_at"),
@@ -202,6 +224,11 @@ class OrganizationInvitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             unique=True,
             postgresql_where=text("status = 'pending'"),
             sqlite_where=text("status = 'pending'"),
+        ),
+        Index(
+            "uq_organization_invitations_token_hash",
+            "token_hash",
+            unique=True,
         ),
     )
 
@@ -216,6 +243,24 @@ class OrganizationInvitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
     )
     intended_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    intended_identity_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    role: Mapped[OrganizationRole] = mapped_column(
+        Enum(
+            OrganizationRole,
+            name="organization_role",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+            values_callable=enum_values,
+        ),
+        nullable=False,
+        default=OrganizationRole.MEMBER,
+        server_default=text("'member'"),
+    )
     status: Mapped[InvitationStatus] = mapped_column(
         Enum(
             InvitationStatus,

@@ -50,11 +50,11 @@ This document defines engineering principles for future implementation. The curr
   verifier errors as `AuthenticationVerifierFailure`. Missing, malformed, unsupported, or empty
   bearer credentials receive a generic `401` with a `WWW-Authenticate: Bearer` challenge.
   Operational failures fail closed and are never reported as successful authentication.
-- **Authorize server-side:** each organization scan service operation validates the active local
-  user and active database membership for its requested organization in the same UOW as scan
-  access; an organization ID alone grants no access. Future protected routes must delegate to an
-  authorized service and test cross-tenant denial rather than using a separate dependency check as
-  authorization for later resource access.
+- **Authorize server-side:** each protected scan and organization lifecycle operation validates
+  the active local user, requested organization, and local membership/role in the same UOW as its
+  protected work; an organization ID alone grants no access. Future protected routes must follow
+  the same boundary rather than relying on a separate dependency check as authorization for later
+  resource access.
 - **Scope the first product resource:** Website/Domain Security Scans each belong to
   exactly one personal or organization scope. Authenticated users may create personal scans, whose
   ownership comes from the authenticated principal, never a client-supplied owner ID; personal scans
@@ -78,8 +78,14 @@ This document defines engineering principles for future implementation. The curr
 - **Own transactions explicitly:** request-scoped sessions are not implicitly committed. Mutations use `unit_of_work()` so success commits, exceptions roll back, and the session closes. Do not add blanket request-level commits.
 - **Keep identity provider-neutral:** internal users are linked to external identities by verified issuer and subject, not email. Only provider-asserted verified email metadata is recorded as verified. Provider organization roles/claims do not confer ThreatSentinel permissions.
 - **Prevent duplicate pending invitations:** PostgreSQL enforces a partial unique index on organization and normalized intended email; application transitions must still recheck status and expiry transactionally.
-- **Retain an active owner:** any future membership removal, demotion, suspension, or owner transfer must validate the projected membership state with the owner-retention invariant and perform the change atomically.
-- **Avoid credential persistence:** no access token, refresh token, invitation bearer token, or secret is stored by this foundation. Never log credentials, claims payloads, or invitation secrets.
+- **Retain an active owner:** membership role/status changes validate the projected state under
+  the organization lock. The general membership route cannot change owners; an explicit owner-only
+  transfer atomically promotes an active member and demotes the prior owner.
+- **Protect invitation tokens:** invitations are bound to an exact verified external identity;
+  only a SHA-256 token hash is stored. Raw invitation tokens are returned once to the authorized
+  creator, accepted once before expiry, and never logged. No email delivery is claimed.
+- **Avoid credential persistence:** access tokens, refresh tokens, and raw invitation bearer tokens
+  are not persisted. Never log credentials, claims payloads, or invitation secrets.
 - **Protect secrets:** keep credentials out of source control and logs; use a managed secret store in deployed environments. The committed `.env.example` contains local-only values.
 - **Fail safely:** avoid returning stack traces, database details, submitted payloads, or secrets in client error responses. Keep health checks free of sensitive diagnostics.
 - **Keep an auditable trail:** future security-relevant changes require protected, tenant-scoped audit events with deliberate retention and access controls.
@@ -119,27 +125,24 @@ Implemented readers are:
   membership phantoms.
 
 Organization creation locks User `FOR SHARE` and validates active status after acquiring the lock.
-It retains that lock while inserting the Organization and initial OWNER Membership in the caller's
+It retains that lock while inserting the Organization and initial OWNER Membership in the route's
 single transaction. It does not mutate User state or upgrade the User lock; `FOR SHARE` blocks a
 protocol-compliant User status writer using `FOR NO KEY UPDATE`. The service and repository do not
-create a nested UOW. There is no production organization-creation route or caller; any future
-application boundary must own exactly one UOW spanning validation and writes. New User and
-ExternalIdentity provisioning remains atomic in the existing principal-resolution UOW.
+create a nested UOW. New User and ExternalIdentity provisioning remains atomic in the existing
+principal-resolution UOW.
 
 Tenant dependencies hold locks only in their own short UOW. A returned organization context
 cannot substitute for authorization in the later transaction that accesses a protected resource.
 Every protected service operation must make its authorization decision and access the protected
 resource in the same UOW.
 
-Future writers for user, organization, membership, invitation, or identity-link lifecycle changes
-are not implemented. Before validation or mutation, every writer that changes existing
-authorization-state rows must acquire `FOR NO KEY UPDATE`, follow User → Organization → Invitation
-→ Membership, and sort same-type rows by UUID. In particular, future User status writers must
-acquire User `FOR NO KEY UPDATE`. Membership creation/restoration locks the Organization before
-inserting/restoring a Membership. Future identity reassignment locks all affected User rows in UUID
-order; readers revalidate their identity mapping after the User lock. Any lifecycle writer must
-meet this contract before its capability is exposed. Do not hold locks across network calls, AI
-inference, or lengthy scan execution.
+Implemented account profile and organization/member/invitation lifecycle writers acquire `FOR NO
+KEY UPDATE` before validation or mutation, follow User → Organization → Invitation → Membership,
+and sort same-type rows by UUID. Membership creation/restoration locks the Organization before
+inserting/restoring a Membership. Account suspension/deactivation, organization archival,
+privileged recovery, and identity reassignment are not exposed because there is no legitimate
+control plane or use case. Any future writer must meet this contract before its capability is
+exposed. Do not hold locks across network calls, AI inference, or lengthy scan execution.
 
 PostgreSQL 17 integration tests use independent sessions/connections, deterministic events,
 bounded waits, and `pg_blocking_pids()` diagnostics. They cover lock blocking and ordering,
@@ -156,29 +159,29 @@ the locking protocol before exposure. See the
 [architecture decision](../architecture/decisions.md#authorization-transaction-and-concurrency-protocol-implemented-postgresql-integration-tests).
 
 The repository has a standalone JWT access-token verifier, a reusable FastAPI authentication
-dependency, a reusable tenant membership dependency, and authenticated scan-persistence routes.
-The tenant dependency uses the existing active-membership check in a short unit-of-work
-transaction; scan routes do not use that separate result as authorization input.
+dependency, a reusable tenant membership dependency, authenticated account/organization lifecycle
+routes, and protected scan-persistence routes. The tenant dependency uses the existing
+active-membership check in a short unit-of-work transaction; protected service operations do not
+use that separate result as authorization input.
 Liveness remains independent of database and authentication configuration. Readiness reports
 database status and local authentication-configuration completeness, but does not initialize the
 verifier or probe live provider/JWKS availability. A previously unknown external identity may
 create a local user and external identity mapping after successful verification; that provisioning
 does not create an organization
-or membership. Inactive local users are rejected, and organization access still requires an
-independently established active local membership. Provider roles and organization claims do not
-grant local authorization. The claims and principal types do not perform or prove cryptographic
-verification by themselves. OIDC discovery, browser login/logout, refresh sessions, session
-revocation, invitation delivery, membership mutation/owner transfer, a general RBAC framework
-beyond the implemented service-level scan authorization policy, audit event storage, rate limiting,
-and production secrets integration remain unimplemented. Service-level authorization is
-implemented for the documented scan actions, and protected persistence routes are mounted. These
-foundations are not a production security control set.
+or membership. Inactive local users are rejected and onboarding cannot reactivate one. Provider
+roles and organization claims do not grant local authorization. The claims and principal types do
+not perform or prove cryptographic verification by themselves. OIDC discovery, browser
+login/logout, refresh sessions, account suspension/reactivation, privileged recovery, invitation
+email delivery, a general RBAC framework beyond the implemented service-level policies, audit event
+storage, rate limiting, and production secrets integration remain unimplemented. Lifecycle
+behavior and remaining limitations are listed in the [Phase 2 roadmap](../architecture/phase-2-roadmap.md).
+These foundations are not a production security control set.
 
 The verifier uses the configured JWKS URL directly; it does not perform OIDC discovery. The
 three-second connection/read timeouts, 64 KiB response limit, 30-second unknown-key refresh
 interval, and five-second minimum refresh interval are implementation safeguards, not configurable
 values. Authentication/session lifecycle, revocation, browser account-onboarding flows, and any
 browser login flow are deferred. Identity-record provisioning for a successfully verified unknown
-issuer/subject pair is implemented separately and does not create organization membership.
-No frontend authentication flow is to be introduced before the backend verification and
-authorization trust boundaries are implemented and tested.
+issuer/subject pair is implemented and does not create organization membership. The web application
+has no authentication state or API client, so lifecycle UI remains deferred; any future UI must
+reuse the backend's established verification and authorization boundaries.

@@ -25,11 +25,11 @@ apps/api (FastAPI, Pydantic Settings)
 PostgreSQL (optional local development dependency)
 ```
 
-The API exposes liveness and readiness checks plus authenticated, scope-authorized scan-record
-persistence operations. The database URL remains optional at startup: readiness reports
-`not_configured` when absent and checks connectivity when present. An additive initial migration
-defines the identity and organization schema; there are no product-facing identity or tenant
-management endpoints.
+The API exposes liveness and readiness checks, authenticated account and organization lifecycle
+operations, and scope-authorized scan-record persistence. The database URL remains optional at
+startup: readiness reports `not_configured` when absent and checks connectivity when present.
+Alembic migrations define identity, tenancy, scan persistence, account profile, and secure
+invitation state.
 
 ## Identity and tenant boundaries
 
@@ -66,20 +66,21 @@ management endpoints.
   addresses while retaining TLS hostname verification, does not follow redirects, uses three
   second connection/read timeouts, limits JWKS responses to 64 KiB, and caps cached keys using
   configuration. Refreshes are throttled, including requests for unknown key IDs.
-- `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial roles; the approved scan action matrix is enforced by the service and exposed through protected persistence routes. General fine-grained permissions beyond that policy are unimplemented.
+- `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation atomically gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the roles. Management operations enforce a local role policy: owners can manage non-owners and invite admins; admins can manage members/viewers and invite members/viewers; only owners can transfer ownership or change organization lifecycle. This is a focused lifecycle policy, not a general fine-grained permissions framework.
 - `OrganizationService` requires a `VerifiedUserContext`, resolves it to a local user by exact issuer and subject, then locks User → Organization → Membership `FOR SHARE` before checking active states. Membership lookup includes inactive rows and checks status after locking. A caller-supplied organization UUID alone is not an authorization check. Provider organization roles or claims are not consumed as application permissions.
 - Organization listing locks User first, then all related Organization rows and Membership rows in sorted UUID order. It loads inactive memberships as well as active ones before locking; the User lock coordinates with protocol-compliant membership writers and prevents phantom memberships during result materialization.
-- Organization creation locks the identity's User `FOR SHARE`, checks active status after acquiring the lock, and retains it through insertion of the Organization and initial OWNER Membership in the caller's single transaction. It does not mutate or upgrade-lock the User; this reader lock blocks protocol-compliant User status writers using `FOR NO KEY UPDATE`. The service/repository do not open a UOW; any future application boundary must own exactly one. No production organization-creation route or caller exists.
-- Pending invitations have a database-enforced unique key per organization and normalized email (lowercase and trimmed); terminal invitations do not block reissue. Invitation delivery and state-transition endpoints are not implemented.
+- Organization creation locks the identity's User `FOR SHARE`, checks active status after acquiring the lock, and retains it through insertion of the Organization and initial OWNER Membership in one route-owned transaction. Pending invitations have a database-enforced unique key per organization and normalized email (lowercase and trimmed); terminal invitations do not block reissue.
+- Invitation records bind to a specific verified external identity, store only a SHA-256 token hash, expire after seven days, and transition atomically with membership activation. The raw token is returned only by the authorized invitation-create response; there is no email delivery integration. Suspension revokes pending invitations; reactivation does not restore them.
+- Lifecycle endpoints use server-side tenant scoping and role checks. Membership changes and ownership transfers run under the canonical row-lock order and validate the active-owner invariant. Organization suspension/reactivation is owner-controlled. There is no account suspend/reactivate or platform recovery endpoint because no legitimate administrative control plane exists.
 - `get_session()` is a request-scoped session resource, not a commit boundary. Mutating application operations must run inside `unit_of_work()`, which owns commit on success, rollback on exceptions, and session closure.
-- `require_active_owner()` validates a projected membership state before a future role/removal operation. Membership changes, owner transfer/removal rules, invitation state-transition services, and automatic enforcement that an organization retain an active owner are not implemented; call the invariant from such operations before exposing management endpoints.
+- `require_active_owner()` validates projected membership state before role/status changes and ownership transfer. Removed memberships cannot be changed directly; a valid invitation may reactivate an eligible non-owner membership. An owner may not be removed or demoted by the general membership endpoint; ownership changes use the explicit transfer operation.
 
-These are application and persistence foundations, not a complete authentication or authorization
-system. The scan API consumes the authentication dependency; each organization-scan service
-operation independently authorizes its requested scope and accesses scans in one UOW. The tenant
-dependency remains available for other future routes, but its context is not a grant for later
-service work. A verified external token produces verified claims; local identity resolution
-produces an authenticated principal; local membership and role authorize organization scan actions.
+These are application capabilities, not a production-ready authentication or authorization
+system. Each protected organization-scan service operation independently authorizes its requested
+scope and accesses scans in one UOW. The tenant dependency remains available, but its context is
+not a grant for later service work. A verified external token produces verified claims; local
+identity resolution produces an authenticated principal; local membership and role authorize
+organization operations.
 
 `packages/shared-contracts` is an intentionally empty starting point for future shared API contracts. It must not become a copy of backend business logic.
 
@@ -116,15 +117,12 @@ See the
 ## Concurrency validation status
 
 The PostgreSQL 17 integration tests exercise independent sessions and connections, deterministic
-events, bounded waits, and PostgreSQL blocking diagnostics. They cover User/Organization/Membership
-lock ordering and blocking, absent-membership serialization, writer-first state observations,
-organization-list consistency, principal resolution after a stale cached User read, concurrent
-same-user organization creation, organization creation versus user status changes, and rollback/lock
-release. The SQLite suite validates existing application behavior but is not evidence of PostgreSQL
-row-lock behavior. This describes validation coverage, not a CI result or production-readiness
-claim. The PostgreSQL marker is configured in CI, but its result must be checked independently.
-Local validation does not imply production deployment or readiness. No schema change was needed,
-so no migration was added.
+events, bounded waits, and PostgreSQL blocking diagnostics. In addition to scan authorization
+locking and organization creation, they cover concurrent identity provisioning, membership
+administration, ownership transfer, and invitation acceptance. The SQLite suite validates
+application behavior but is not evidence of PostgreSQL row-lock behavior. Local validation does
+not imply remote CI success, production deployment, or readiness. See the
+[Phase 2 roadmap](./phase-2-roadmap.md) for current lifecycle capabilities and deferred controls.
 
 ## Design direction
 
@@ -137,9 +135,9 @@ so no migration was added.
 
 ## Planned, not implemented
 
-Protected scan persistence routes are implemented, but scan execution and analysis, OIDC
-discovery and browser flows, invitation delivery and acceptance, general fine-grained permissions
-beyond the documented scan authorization policy, detection, risk assessment, AI inference,
-investigations, intelligence feeds, billing, developer integrations, security audit storage, and
-production deployment are future capabilities. Identity and tenancy management records and service
-boundaries remain foundations, not completed account or organization lifecycle capabilities.
+Protected scan persistence and the lifecycle API described in the
+[Phase 2 roadmap](./phase-2-roadmap.md) are implemented. Scan execution and analysis, OIDC
+discovery and browser login flows, invitation email delivery, account suspension/reactivation,
+administrative recovery, a general fine-grained permissions framework, detection, risk assessment,
+AI inference, investigations, intelligence feeds, billing, developer integrations, security audit
+storage, frontend lifecycle UI, and production deployment remain future capabilities.

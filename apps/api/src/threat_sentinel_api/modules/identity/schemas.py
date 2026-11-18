@@ -1,7 +1,14 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 
 class VerifiedAccessTokenClaims(BaseModel):
@@ -100,3 +107,26 @@ class AuthenticatedPrincipal(VerifiedUserContext):
 
     user_id: UUID
     external_identity_id: UUID
+
+
+class AccountProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    display_name: StrictStr | None = Field(max_length=100)
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("display_name must not be blank")
+        return normalized
+
+
+class AccountProfileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    display_name: str | None
+    created_at: datetime

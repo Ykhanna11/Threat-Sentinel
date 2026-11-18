@@ -15,6 +15,10 @@ class OrganizationAccessDenied(PermissionError):
     """Compatibility base for organization scope and action denials."""
 
 
+class OrganizationConflict(RuntimeError):
+    """Raised when an organization lifecycle operation conflicts with existing state."""
+
+
 class OrganizationScopeUnavailable(OrganizationAccessDenied):
     """Raised when the requested organization scope is missing or inaccessible."""
 
@@ -39,6 +43,8 @@ class OrganizationService:
         )
         if owner is None:
             raise ActiveUserRequired("An active local user is required.")
+        if self._repository.slug_exists(details.slug):
+            raise OrganizationConflict("An organization with that slug already exists.")
         return self._repository.create_with_owner(details, owner)
 
     def list_organizations(self, principal: VerifiedUserContext) -> list[Organization]:

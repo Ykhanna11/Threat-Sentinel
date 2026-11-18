@@ -13,7 +13,7 @@ def test_postgres_17_database_is_initialized_from_alembic_migrations(
 
     assert version is not None
     assert int(version) // 10000 == 17
-    assert revision == "0557465b3944"
+    assert revision == "39ac72e0fd51"
     assert {
         "users",
         "external_identities",

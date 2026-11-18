@@ -1,12 +1,13 @@
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
-from threat_sentinel_api.modules.identity.models import User
+from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
 from threat_sentinel_api.modules.identity.schemas import VerifiedUserContext
 from threat_sentinel_api.modules.tenants.enums import (
     InvitationStatus,
@@ -25,6 +26,7 @@ from threat_sentinel_api.modules.tenants.schemas import OrganizationCreate
 from threat_sentinel_api.modules.tenants.service import (
     ActiveUserRequired,
     OrganizationAccessDenied,
+    OrganizationConflict,
     OrganizationService,
 )
 
@@ -34,6 +36,14 @@ def identity_context(subject: str) -> VerifiedUserContext:
         issuer="https://identity.example",
         subject=subject,
     )
+
+
+def _identity_id(session: Session, user: User) -> UUID:
+    identity_id = session.scalar(
+        select(ExternalIdentity.id).where(ExternalIdentity.user_id == user.id)
+    )
+    assert identity_id is not None
+    return identity_id
 
 
 def test_user_can_have_memberships_in_multiple_organizations(
@@ -140,7 +150,7 @@ def test_organization_slug_is_unique(
         OrganizationCreate(name="One", slug="same-slug"),
     )
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(OrganizationConflict):
         organization_service.create_organization(
             identity_context("creator"),
             OrganizationCreate(name="Two", slug="same-slug"),
@@ -257,12 +267,15 @@ def test_invitation_states_expiration_and_accepted_membership_integrity(
     session.add(accepted_membership)
     session.flush()
     now = datetime.now(UTC)
+    inviter_identity_id = _identity_id(session, inviter)
     session.add_all(
         [
             OrganizationInvitation(
                 organization=organization,
                 inviter=inviter,
                 intended_email="pending@example.test",
+                intended_identity_id=inviter_identity_id,
+                token_hash="a" * 64,
                 status=InvitationStatus.PENDING,
                 expires_at=now + timedelta(days=2),
             ),
@@ -325,6 +338,8 @@ def test_duplicate_pending_invitation_email_is_normalized_per_organization(
             organization=organization,
             inviter=inviter,
             intended_email="  Person@Example.Test ",
+            intended_identity_id=_identity_id(session, inviter),
+            token_hash="a" * 64,
             expires_at=expires_at,
         )
     )
@@ -334,6 +349,8 @@ def test_duplicate_pending_invitation_email_is_normalized_per_organization(
             organization=organization,
             inviter=inviter,
             intended_email="person@example.test",
+            intended_identity_id=_identity_id(session, inviter),
+            token_hash="b" * 64,
             expires_at=expires_at,
         )
     )
@@ -358,12 +375,14 @@ def test_revoked_invitation_can_be_reissued_and_email_can_be_invited_elsewhere(
     )
     now = datetime.now(UTC)
     email = "person@example.test"
+    inviter_identity_id = _identity_id(session, inviter)
     session.add_all(
         [
             OrganizationInvitation(
                 organization=first,
                 inviter=inviter,
                 intended_email=email,
+                intended_identity_id=inviter_identity_id,
                 status=InvitationStatus.REVOKED,
                 revoked_at=now,
                 expires_at=now + timedelta(days=1),
@@ -372,12 +391,16 @@ def test_revoked_invitation_can_be_reissued_and_email_can_be_invited_elsewhere(
                 organization=first,
                 inviter=inviter,
                 intended_email=email,
+                intended_identity_id=inviter_identity_id,
+                token_hash="a" * 64,
                 expires_at=now + timedelta(days=1),
             ),
             OrganizationInvitation(
                 organization=second,
                 inviter=inviter,
                 intended_email=email,
+                intended_identity_id=inviter_identity_id,
+                token_hash="b" * 64,
                 expires_at=now + timedelta(days=1),
             ),
         ]

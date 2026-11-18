@@ -1,6 +1,6 @@
 # Architecture decisions
 
-These decisions are the approved foundation for the initial project scaffold. They do not imply that future product capabilities have been implemented.
+These decisions describe the current architecture and its boundaries; they do not imply that deferred product capabilities have been implemented.
 
 | Area | Decision |
 | --- | --- |
@@ -19,8 +19,8 @@ These decisions are the approved foundation for the initial project scaffold. Th
 | Authentication boundary | Keep untrusted bearer credentials, verifier-produced access-token claims, resolved local application identity, and authorization decisions separate. The provider-neutral adapter returns only the minimal typed verified claims; local identity resolution produces a principal only for an active user. Issuer, audience, JWKS URL, and allowed algorithms are trusted out-of-band settings and must be configured together. JWT verification and reusable FastAPI authentication and tenant dependencies are implemented. The protected scan routes consume authentication; the scan service owns authorization. |
 | Tenant authorization | Authorization uses local user identity, active local membership, locally assigned organization role, and resource scope. Current reader paths serialize against authorization-state writers with PostgreSQL row locks. Provider-supplied roles, permissions, or organization claims never grant local access. No role hierarchy, implicit permission inheritance, or authorization caching is introduced. |
 | Transaction ownership | Request-scoped `get_session()` does not commit implicitly. Scan and principal-resolution application operations use one `unit_of_work()`. Organization service/repository methods remain transaction-neutral; their caller must own one UOW spanning active-user validation, locks, and writes. |
-| Invitations | A partial unique index permits only one pending invitation per organization and normalized email; terminal invitations may be reissued. Invitations can reference only a membership in the same organization. No delivery or bearer-token mechanism is implemented. |
-| Owner retention | Projected membership changes must retain an active owner. A reusable domain invariant exists, but no membership mutation or ownership-transfer operations are implemented. |
+| Invitations | A partial unique index permits one pending invitation per organization and normalized email. Invitations bind to a verified external identity, store only a token hash, expire after seven days, and are single-use. There is no email-delivery integration; authorized creation returns the token once. |
+| Owner retention | Membership role/status changes and explicit ownership transfer validate the projected state under the canonical PostgreSQL lock order. An organization retains an active owner; ownership transfer is atomic. |
 
 ## Consequences
 
@@ -30,9 +30,9 @@ These decisions are the approved foundation for the initial project scaffold. Th
 - Future shared TypeScript contracts should describe API boundaries, not reimplement backend rules.
 - External identity resolution uses the exact `(issuer, subject)` pair. A previously unknown verified identity may create a local user and external identity mapping, but this provisioning creates no organization or membership. Organization creation explicitly grants the creator the initial owner membership.
 - Authentication verification, local identity resolution, and tenant authorization are separate
-  reusable dependencies/contracts. The protected scan API mounts authentication; scan
-  authorization remains in the scan service and does not rely on the tenant dependency's separate
-  UOW.
+  reusable dependencies/contracts. Protected scan and account/organization lifecycle APIs mount
+  authentication and perform server-side authorization in their own UOWs; they do not rely on a
+  separate tenant dependency result as a grant.
 - The first product resource is a Website/Domain Security Scan. Its model, scoped repository,
   lock-protected authorization-aware service, and protected persistence routes are implemented;
   scan execution and analysis are not.
@@ -58,7 +58,7 @@ These decisions are the approved foundation for the initial project scaffold. Th
   their own UOW. PyJWT (MIT) and its
   `cryptography` dependency (Apache-2.0/BSD-3-Clause) are free/open-source and add no provider or
   paid service.
-- Repository/service writes must be grouped in exactly one application-boundary-owned `unit_of_work()`; request session cleanup does not imply a commit. Scan and principal-resolution operations currently own one UOW each. Organization creation has no production route, so any future caller must provide this boundary.
+- Repository/service writes must be grouped in exactly one application-boundary-owned `unit_of_work()`; request session cleanup does not imply a commit. Scan, account profile, organization, membership, and invitation routes own the transaction spanning authorization and their state changes.
 - Persistence models are internal and must not be exposed directly as public API response contracts.
 - Product security and privacy decisions must precede collection or processing of user-provided threat evidence.
 
@@ -145,11 +145,10 @@ Current protected readers are:
 
 Organization creation obtains the exact identity mapping, locks User `FOR SHARE`, then validates
 active status after acquiring that lock. The lock remains held through insertion of the Organization
-and initial active OWNER Membership in the caller's single transaction. It does not upgrade the
+and initial active OWNER Membership in the route's single transaction. It does not upgrade the
 User lock or mutate the User row; User `FOR SHARE` blocks a protocol-compliant User status writer
-using `FOR NO KEY UPDATE`. The Organization insert precedes the Membership insert. There is no
-production organization-creation route or caller. The service and repository do not open nested
-UOWs; a future application boundary must wrap both validation and writes in exactly one UOW.
+using `FOR NO KEY UPDATE`. The Organization insert precedes the Membership insert. The service and
+repository do not open nested UOWs.
 
 Identity provisioning for a previously unknown verified identity continues to insert User and
 ExternalIdentity atomically in the principal-resolution UOW. There is no production operation
@@ -162,13 +161,12 @@ the dependency's authorization decision and end when that UOW closes. A dependen
 organization context is not authorization for later handler work; each protected service
 operation must authorize and access its resource within its own single UOW.
 
-Future user/organization lifecycle changes, membership creation/restoration/removal/suspension,
-role changes, invitation transitions, ownership transfer, and identity relinking are not
-implemented. Future writers that mutate existing authorization state must acquire `FOR NO KEY
+Implemented account profile and organization/member/invitation lifecycle writers acquire `FOR NO KEY
 UPDATE` before validation or mutation, follow User → Organization → Invitation → Membership, sort
-same-type rows by UUID, and lock the Organization before creating/restoring a Membership. In
-particular, future User status writers must acquire User `FOR NO KEY UPDATE`; organization creation
-only reads User state and uses `FOR SHARE`. Any future lifecycle writer must comply before its
+same-type rows by UUID, and lock the Organization before creating/restoring a Membership. The
+explicit owner transfer locks both affected users, then changes both memberships atomically.
+Account suspension/deactivation, organization archival, privileged recovery, and identity
+reassignment remain unavailable; any future writer must comply with this lock protocol before its
 capability is exposed. Do not add a separate identity lock without a demonstrated requirement.
 
 Do not add retries, arbitrary lock timeouts, isolation changes, or authorization caching. A
@@ -211,6 +209,7 @@ not run. The dedicated local test container was disposable; no development datab
 The repository's separate remote CI workflow and deployment-specific security review were not run
 or claimed.
 
-There are no outstanding Phase 2C implementation items in this crosswalk. Phase 2D lifecycle
-capabilities remain explicitly unimplemented; future authorization-state writers must follow the
-locking protocol above.
+There are no outstanding Phase 2C implementation items in this crosswalk. The
+[Phase 2 roadmap](./phase-2-roadmap.md) records Phase 2D lifecycle implementation, validation, and
+deferred requirements; do not claim the phase fully complete while account suspension/reactivation
+and legitimate administrative recovery remain unavailable.

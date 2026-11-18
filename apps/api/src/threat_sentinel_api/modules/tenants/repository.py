@@ -66,6 +66,12 @@ class OrganizationRepository:
         self._session.flush()
         return organization
 
+    def slug_exists(self, slug: str) -> bool:
+        return (
+            self._session.scalar(select(Organization.id).where(Organization.slug == slug).limit(1))
+            is not None
+        )
+
     def find_active_membership(
         self,
         organization_id: UUID,

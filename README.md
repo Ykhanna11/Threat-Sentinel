@@ -1,6 +1,6 @@
 # ThreatSentinel
 
-ThreatSentinel is a privacy-first cybersecurity intelligence platform in development by Meta Infinium. This repository contains its engineering foundation; it is **not production-ready** and does not yet implement threat analysis, authentication flows/provider integration, billing, or other product capabilities.
+ThreatSentinel is a privacy-first cybersecurity intelligence platform in development by Meta Infinium. This repository contains an engineering foundation; it is **not production-ready**. The API has a configurable JWT verification boundary, local account and organization lifecycle operations, and protected scan-record persistence, but no browser login flow, scan execution, threat analysis, billing, or production control plane.
 
 ## Repository
 
@@ -49,7 +49,7 @@ pnpm dev:api
 
 The API is available at <http://127.0.0.1:8000>; interactive API documentation is at <http://127.0.0.1:8000/docs>. Liveness and readiness endpoints are `GET /api/v1/health` and `GET /api/v1/ready`.
 
-Liveness is independent of database and authentication configuration. Readiness reports the database status and `authentication_configuration` (`configured` or `not_configured`). When `DATABASE_URL` is set, readiness checks the database connection and returns `503` if it is unavailable. Authentication configuration status reflects only whether the required local settings are complete; readiness does not initialize the JWT verifier or JWKS infrastructure and does not verify provider reachability, token validity, or whether protected product routes exist. The current API has no database-dependent or authentication-protected product routes.
+Liveness is independent of database and authentication configuration. Readiness reports the database status and `authentication_configuration` (`configured` or `not_configured`). When `DATABASE_URL` is set, readiness checks the database connection and returns `503` if it is unavailable. Authentication configuration status reflects only whether the required local settings are complete; readiness does not initialize the JWT verifier or JWKS infrastructure or verify provider reachability or token validity. Protected API routes fail closed when authentication is unavailable.
 
 ## Local PostgreSQL
 
@@ -67,13 +67,13 @@ pnpm db:down
 
 To remove the local database and its persisted data, run `pnpm db:down:volumes`. This is destructive and intended only for local development.
 
-The example `.env` configures the API to connect to this local database. The initial migration creates the identity and organization-tenancy schema:
+The example `.env` configures the API to connect to this local database. Apply all current schema migrations:
 
 ```bash
 uv run --directory apps/api --project . alembic upgrade head
 ```
 
-Identity and tenancy are not exposed through product API routes yet.
+The versioned API exposes authenticated account-profile, organization, membership, invitation, and protected scan-persistence routes. See the [Phase 2 roadmap](docs/architecture/phase-2-roadmap.md) for implemented behavior and explicitly deferred capabilities.
 
 ## PostgreSQL integration tests
 
@@ -140,4 +140,4 @@ pnpm --filter @threat-sentinel/web exec playwright install-deps chromium
 
 ## Architecture and status
 
-See [the architecture overview](docs/architecture/overview.md), [architecture decisions](docs/architecture/decisions.md), [security principles](docs/security/security-principles.md), and [privacy and data handling](docs/privacy/data-handling.md). Planned product capabilities are explicitly not represented as implemented features.
+See [the architecture overview](docs/architecture/overview.md), [architecture decisions](docs/architecture/decisions.md), [Phase 2 roadmap](docs/architecture/phase-2-roadmap.md), [security principles](docs/security/security-principles.md), and [privacy and data handling](docs/privacy/data-handling.md). Planned product capabilities are explicitly not represented as implemented features.

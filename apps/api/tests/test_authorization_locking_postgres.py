@@ -32,14 +32,24 @@ from threat_sentinel_api.modules.identity.service import IdentityService, Inacti
 from threat_sentinel_api.modules.scans.models import SecurityScan
 from threat_sentinel_api.modules.scans.repository import ScanRepository
 from threat_sentinel_api.modules.scans.service import ScanService
+from threat_sentinel_api.modules.tenants.lifecycle_service import OrganizationLifecycleService
 from threat_sentinel_api.modules.tenants.enums import (
+    InvitationStatus,
     MembershipStatus,
     OrganizationRole,
     OrganizationStatus,
 )
-from threat_sentinel_api.modules.tenants.models import Organization, OrganizationMembership
+from threat_sentinel_api.modules.tenants.models import (
+    Organization,
+    OrganizationInvitation,
+    OrganizationMembership,
+)
 from threat_sentinel_api.modules.tenants.repository import OrganizationRepository
-from threat_sentinel_api.modules.tenants.schemas import OrganizationCreate
+from threat_sentinel_api.modules.tenants.schemas import (
+    InvitationCreate,
+    MembershipUpdate,
+    OrganizationCreate,
+)
 from threat_sentinel_api.modules.tenants.service import (
     ActiveUserRequired,
     OrganizationAccessDenied,
@@ -65,7 +75,12 @@ class AuthorizationTestData:
         self.user_ids: set[UUID] = set()
         self.organization_ids: set[UUID] = set()
 
-    def create_user(self) -> IdentityFixture:
+    def create_user(
+        self,
+        *,
+        email: str | None = None,
+        email_verified: bool = False,
+    ) -> IdentityFixture:
         subject = str(uuid4())
         with self.factory() as session:
             user = User()
@@ -73,6 +88,8 @@ class AuthorizationTestData:
                 user=user,
                 issuer=ISSUER,
                 subject=subject,
+                email=email,
+                email_verified_at=datetime.now(UTC) if email_verified else None,
             )
             session.add(identity)
             session.flush()
@@ -84,10 +101,15 @@ class AuthorizationTestData:
                     external_identity_id=identity.id,
                     issuer=ISSUER,
                     subject=subject,
-                    email=None,
-                    email_verified=False,
+                    email=email,
+                    email_verified=email_verified,
                 ),
-                context=VerifiedUserContext(issuer=ISSUER, subject=subject),
+                context=VerifiedUserContext(
+                    issuer=ISSUER,
+                    subject=subject,
+                    email=email,
+                    email_verified=email_verified,
+                ),
             )
             self.user_ids.add(user.id)
             session.commit()
@@ -165,6 +187,17 @@ class AuthorizationTestData:
                 if self.organization_ids:
                     scan_criteria.append(SecurityScan.organization_id.in_(self.organization_ids))
                 session.execute(delete(SecurityScan).where(or_(*scan_criteria)))
+                invitation_criteria = []
+                if self.user_ids:
+                    invitation_criteria.append(
+                        OrganizationInvitation.inviter_user_id.in_(self.user_ids)
+                    )
+                if self.organization_ids:
+                    invitation_criteria.append(
+                        OrganizationInvitation.organization_id.in_(self.organization_ids)
+                    )
+                if invitation_criteria:
+                    session.execute(delete(OrganizationInvitation).where(or_(*invitation_criteria)))
                 membership_criteria = []
                 if self.user_ids:
                     membership_criteria.append(OrganizationMembership.user_id.in_(self.user_ids))
@@ -992,3 +1025,259 @@ def test_failed_scan_transaction_rolls_back_and_releases_user_lock(
             == 0
         )
         assert lock_user_for_no_key_update(session, identity.user_id) is not None
+
+
+def test_concurrent_identity_onboarding_resolves_to_one_local_account(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    subject = str(uuid4())
+    now = datetime.now(UTC)
+    claims = VerifiedAccessTokenClaims(
+        issuer=ISSUER,
+        subject=subject,
+        audiences=("threat-sentinel-api",),
+        issued_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    with postgres_session_factory() as session:
+        baseline_user_count = session.scalar(select(func.count()).select_from(User))
+    assert baseline_user_count is not None
+
+    barrier = Barrier(2)
+    bounded_factory = _session_factory_with_postgres_timeouts(postgres_session_factory)
+
+    def onboard() -> AuthenticatedPrincipal:
+        barrier.wait(timeout=5)
+        with unit_of_work(bounded_factory) as session:
+            return IdentityService(IdentityRepository(session)).resolve_authenticated_principal(
+                claims
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(onboard), executor.submit(onboard)]
+        principals = [future.result(timeout=15) for future in futures]
+
+    assert principals[0].user_id == principals[1].user_id
+    assert principals[0].external_identity_id == principals[1].external_identity_id
+    authorization_data.user_ids.add(principals[0].user_id)
+    with postgres_session_factory() as session:
+        external_identity_count = session.scalar(
+            select(func.count())
+            .select_from(ExternalIdentity)
+            .where(
+                ExternalIdentity.issuer == ISSUER,
+                ExternalIdentity.subject == subject,
+            )
+        )
+        onboarded_user_count = session.scalar(select(func.count()).select_from(User))
+        external_identity_user_id = session.scalar(
+            select(ExternalIdentity.user_id).where(
+                ExternalIdentity.issuer == ISSUER,
+                ExternalIdentity.subject == subject,
+            )
+        )
+
+    assert external_identity_count == 1
+    assert onboarded_user_count == baseline_user_count + 1
+    assert external_identity_user_id == principals[0].user_id
+
+
+def test_concurrent_invitation_acceptance_consumes_token_once(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    owner = authorization_data.create_user()
+    invitee = authorization_data.create_user(
+        email=f"{uuid4()}@example.test",
+        email_verified=True,
+    )
+    organization_id = authorization_data.create_organization(owner)
+    with unit_of_work(postgres_session_factory) as session:
+        invitation, token = OrganizationLifecycleService(session).create_invitation(
+            owner.principal,
+            organization_id,
+            InvitationCreate(
+                email=invitee.principal.email or "",
+                role=OrganizationRole.MEMBER,
+            ),
+        )
+        invitation_id = invitation.id
+
+    barrier = Barrier(2)
+    bounded_factory = _session_factory_with_postgres_timeouts(postgres_session_factory)
+
+    def accept() -> bool:
+        barrier.wait(timeout=5)
+        with unit_of_work(bounded_factory) as session:
+            membership = OrganizationLifecycleService(session).accept_invitation(
+                invitee.principal,
+                token,
+            )
+            return membership is not None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(accept), executor.submit(accept)]
+        results = [future.result(timeout=15) for future in futures]
+
+    assert sorted(results) == [False, True]
+    with postgres_session_factory() as session:
+        invitation = session.get(OrganizationInvitation, invitation_id)
+        assert invitation is not None
+        assert invitation.status is InvitationStatus.ACCEPTED
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(OrganizationMembership)
+                .where(
+                    OrganizationMembership.organization_id == organization_id,
+                    OrganizationMembership.user_id == invitee.user_id,
+                )
+            )
+            == 1
+        )
+
+
+def test_concurrent_ownership_transfers_preserve_active_owner_invariant(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    first_owner = authorization_data.create_user()
+    second_owner = authorization_data.create_user()
+    first_target = authorization_data.create_user()
+    second_target = authorization_data.create_user()
+    organization_id = authorization_data.create_organization(
+        first_owner,
+        membership_user=second_owner,
+        role=OrganizationRole.OWNER,
+    )
+    with postgres_session_factory() as session, session.begin():
+        session.add_all(
+            [
+                OrganizationMembership(
+                    organization_id=organization_id,
+                    user_id=first_target.user_id,
+                    role=OrganizationRole.MEMBER,
+                ),
+                OrganizationMembership(
+                    organization_id=organization_id,
+                    user_id=second_target.user_id,
+                    role=OrganizationRole.MEMBER,
+                ),
+            ]
+        )
+
+    with postgres_session_factory() as session:
+        target_ids = dict(
+            session.execute(
+                select(OrganizationMembership.user_id, OrganizationMembership.id).where(
+                    OrganizationMembership.organization_id == organization_id,
+                    OrganizationMembership.user_id.in_(
+                        [first_target.user_id, second_target.user_id]
+                    ),
+                )
+            ).all()
+        )
+
+    barrier = Barrier(2)
+    bounded_factory = _session_factory_with_postgres_timeouts(postgres_session_factory)
+
+    def transfer(owner: IdentityFixture, target_user_id: UUID) -> None:
+        barrier.wait(timeout=5)
+        with unit_of_work(bounded_factory) as session:
+            OrganizationLifecycleService(session).transfer_ownership(
+                owner.principal,
+                organization_id,
+                target_ids[target_user_id],
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(transfer, first_owner, first_target.user_id),
+            executor.submit(transfer, second_owner, second_target.user_id),
+        ]
+        for future in futures:
+            future.result(timeout=15)
+
+    with postgres_session_factory() as session:
+        active_owners = session.scalars(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationMembership.role == OrganizationRole.OWNER,
+                OrganizationMembership.status == MembershipStatus.ACTIVE,
+            )
+        ).all()
+        assert len(active_owners) == 2
+        assert {membership.user_id for membership in active_owners} == {
+            first_target.user_id,
+            second_target.user_id,
+        }
+
+
+def test_concurrent_member_suspensions_retain_the_organization_owner(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    owner = authorization_data.create_user()
+    first_member = authorization_data.create_user()
+    second_member = authorization_data.create_user()
+    organization_id = authorization_data.create_organization(
+        owner,
+        membership_user=first_member,
+        role=OrganizationRole.MEMBER,
+    )
+    with postgres_session_factory() as session, session.begin():
+        session.add(
+            OrganizationMembership(
+                organization_id=organization_id,
+                user_id=second_member.user_id,
+                role=OrganizationRole.VIEWER,
+            )
+        )
+    with postgres_session_factory() as session:
+        target_ids = dict(
+            session.execute(
+                select(OrganizationMembership.user_id, OrganizationMembership.id).where(
+                    OrganizationMembership.organization_id == organization_id,
+                    OrganizationMembership.user_id.in_(
+                        [first_member.user_id, second_member.user_id]
+                    ),
+                )
+            ).all()
+        )
+
+    barrier = Barrier(2)
+    bounded_factory = _session_factory_with_postgres_timeouts(postgres_session_factory)
+
+    def suspend(membership_id: UUID) -> None:
+        barrier.wait(timeout=5)
+        with unit_of_work(bounded_factory) as session:
+            OrganizationLifecycleService(session).update_membership(
+                owner.principal,
+                organization_id,
+                membership_id,
+                MembershipUpdate(status=MembershipStatus.SUSPENDED),
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(suspend, target_ids[first_member.user_id]),
+            executor.submit(suspend, target_ids[second_member.user_id]),
+        ]
+        for future in futures:
+            future.result(timeout=15)
+
+    with postgres_session_factory() as session:
+        memberships = session.scalars(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == organization_id,
+            )
+        ).all()
+        assert (
+            sum(
+                member.role is OrganizationRole.OWNER and member.status is MembershipStatus.ACTIVE
+                for member in memberships
+            )
+            == 1
+        )
+        assert sum(member.status is MembershipStatus.SUSPENDED for member in memberships) == 2

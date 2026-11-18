@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+from sqlalchemy.exc import IntegrityError
+
 from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
@@ -41,16 +43,38 @@ class IdentityService:
             return user
 
         user = User()
-        self._repository.add(
-            ExternalIdentity(
-                user=user,
-                issuer=context.issuer,
-                subject=context.subject,
-                email=context.email,
-                email_verified_at=self._verified_at(context),
+        try:
+            self._repository.add_in_savepoint(
+                ExternalIdentity(
+                    user=user,
+                    issuer=context.issuer,
+                    subject=context.subject,
+                    email=context.email,
+                    email_verified_at=self._verified_at(context),
+                )
             )
-        )
-        return user
+            return user
+        except IntegrityError:
+            locked_identity = self._repository.lock_user_for_identity_share(
+                context.issuer,
+                context.subject,
+            )
+            if locked_identity is None:
+                raise
+            identity_id, resolved_user = locked_identity
+            if resolved_user.status is not UserStatus.ACTIVE:
+                raise InactiveUserError("The linked account is not active.") from None
+            identity = self._repository.find_by_issuer_subject(context.issuer, context.subject)
+            if (
+                identity is None
+                or identity.id != identity_id
+                or identity.user_id != resolved_user.id
+            ):
+                raise InvalidPrincipalError(
+                    "The authenticated principal is no longer valid."
+                ) from None
+            self._refresh_email_metadata(identity, context)
+            return resolved_user
 
     def resolve_authenticated_principal(
         self,

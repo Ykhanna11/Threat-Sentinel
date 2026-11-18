@@ -3,8 +3,12 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from threat_sentinel_api.db.authorization_locks import lock_user_for_share
+from threat_sentinel_api.db.authorization_locks import (
+    lock_user_for_no_key_update,
+    lock_user_for_share,
+)
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
+from threat_sentinel_api.modules.identity.schemas import AuthenticatedPrincipal
 
 
 class IdentityRepository:
@@ -43,6 +47,19 @@ class IdentityRepository:
             return None
         return identity_id, user
 
+    def lock_user_for_principal_update(
+        self,
+        principal: AuthenticatedPrincipal,
+    ) -> User | None:
+        link = self.find_identity_link(principal.issuer, principal.subject)
+        if link is None or link != (principal.external_identity_id, principal.user_id):
+            return None
+
+        user = lock_user_for_no_key_update(self._session, principal.user_id)
+        if user is None or self.find_identity_link(principal.issuer, principal.subject) != link:
+            return None
+        return user
+
     def lock_user_for_organization_creation(
         self,
         issuer: str,
@@ -62,4 +79,17 @@ class IdentityRepository:
 
     def add(self, identity: ExternalIdentity) -> None:
         self._session.add(identity)
+        self._session.flush()
+
+    def add_in_savepoint(self, identity: ExternalIdentity) -> None:
+        connection = self._session.connection()
+        if connection.dialect.name == "sqlite" and not getattr(
+            connection.connection.driver_connection, "in_transaction", False
+        ):
+            connection.exec_driver_sql("BEGIN")
+        with self._session.begin_nested():
+            self._session.add(identity)
+            self._session.flush()
+
+    def flush(self) -> None:
         self._session.flush()
