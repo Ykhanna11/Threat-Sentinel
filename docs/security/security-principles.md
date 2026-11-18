@@ -13,7 +13,9 @@ This document defines engineering principles for future implementation. The curr
 - **Separate authorization:** a verified token and authenticated local principal do not themselves
   grant organization access or permissions. Resolve active local user, organization, and membership
   from the database, then apply locally defined permissions. Ignore provider roles and organization
-  claims for authorization; identity resolution alone creates no membership.
+  claims for authorization; identity resolution alone creates no membership. The reusable tenant
+  dependency checks membership against the requested organization ID and returns only a scoped
+  principal/organization/membership context, with no role or permission fields.
 - **Preserve identity values:** use the exact verified issuer and subject pair for external identity
   resolution; reject empty values without trimming or otherwise changing the identity key. Email is
   metadata only and never links accounts.
@@ -59,14 +61,14 @@ This document defines engineering principles for future implementation. The curr
 - **Use defense in depth:** require dependency updates, code review, automated checks, secure transport, least privilege, backups, and incident-response procedures before production use.
 - **Test security boundaries:** add threat modeling, input abuse cases, authorization and tenant-isolation tests, and secret/log redaction checks alongside the relevant features.
 
-The repository now has a standalone JWT access-token verifier and a reusable FastAPI authentication
-dependency that verifies bearer credentials and resolves active local principals in a short
-unit-of-work transaction. The dependency is not attached to authentication routes or protected
-product routes; health/readiness remain independent of provider configuration. The claims and
-principal types do not perform or prove cryptographic verification by themselves. OIDC discovery,
-browser flows, membership mutation/owner transfer, invitation transition services, fine-grained
-permission enforcement, audit event storage, rate limiting, and production secrets integration
-remain unimplemented. These foundations are not a production security control set.
+The repository now has a standalone JWT access-token verifier, a reusable FastAPI authentication
+dependency, and a reusable tenant membership dependency. The tenant dependency uses the existing
+active membership check in a short unit-of-work transaction; it is not attached to product routes,
+and health/readiness remain independent of provider configuration. The claims and principal types
+do not perform or prove cryptographic verification by themselves. OIDC discovery, browser flows,
+membership mutation/owner transfer, invitation transition services, fine-grained permission
+enforcement, audit event storage, rate limiting, and production secrets integration remain
+unimplemented. These foundations are not a production security control set.
 
 The verifier uses the configured JWKS URL directly; it does not perform OIDC discovery. The
 three-second connection/read timeouts, 64 KiB response limit, 30-second unknown-key refresh
