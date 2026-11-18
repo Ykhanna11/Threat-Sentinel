@@ -20,6 +20,12 @@ This document defines engineering principles for future implementation. The curr
   claims, subject, and required access-token purpose/type. Reject `none`, algorithm confusion,
   untrusted issuers, unknown keys, and tokens intended for another purpose. A verified ID token
   must not be accepted as an API access token.
+- **Trust authentication configuration only out of band:** the expected issuer, audience, trusted
+  HTTPS JWKS endpoint, and explicit algorithm allowlist come from deployment configuration, never
+  from an incoming token or request. They must be configured together; issuer/JWKS URLs reject
+  plain HTTP, user information, queries, and fragments. Clock-skew and future JWKS-cache settings
+  have strict bounds. Configuration alone does not authenticate anyone. Cryptographic validation
+  and JWKS fetching are deferred to Task 2B.3.
 - **Return safe authentication failures:** distinguish missing/malformed credentials, invalid
   signature or algorithm, untrusted issuer, audience or time failures, missing subject, unknown
   key, inactive local user, and authorization denial internally. Invalid or unusable credentials
@@ -48,8 +54,8 @@ transfer operation, invitation transition service, fine-grained permission enfor
 storage, rate limiting, or production secrets integration. These foundations are not a production
 security control set.
 
-The later verifier design must choose issuer/audience configuration, allowed algorithms and key
-sources, token-type rules, clock-skew policy, and JWKS outage behavior. Authentication/session
+Task 2B.3 will implement cryptographic verification and decide key-source and token-type rules,
+clock-skew use, and JWKS outage behavior for the configured values. Authentication/session
 lifecycle, revocation, onboarding of unknown identities, and any browser flow are also deferred.
 No frontend authentication flow is to be introduced before the backend verification and
 authorization trust boundaries are implemented and tested.

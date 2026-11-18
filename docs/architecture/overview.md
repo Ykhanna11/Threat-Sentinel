@@ -34,6 +34,10 @@ The API currently exposes only liveness and readiness checks. The database URL r
   successful verifier; it requires issuer, subject, audience, issuance time, and expiration, and
   excludes the bearer token and arbitrary provider claims. `AuthenticationProvider` is only a
   provider-neutral protocol and now returns this type. The type does not itself verify a token.
+- Optional verifier settings are loaded out of band from the environment. The expected issuer,
+  audience, trusted HTTPS JWKS URL, and explicit signing-algorithm allowlist must be configured as
+  a complete set. These values are not accepted from tokens or requests, and configuring them
+  alone does not activate authentication; cryptographic verification remains future work.
 - `VerifiedUserContext` remains the Phase 2A internal issuer/subject and email-metadata contract
   used by identity and tenancy services; it is neither an untrusted request schema nor proof of
   token verification. `IdentityService.resolve_authenticated_principal()` resolves verified
