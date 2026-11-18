@@ -9,7 +9,7 @@ from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
 from threat_sentinel_api.modules.identity.schemas import AuthenticatedPrincipal
-from threat_sentinel_api.modules.identity.service import InactiveUserError
+from threat_sentinel_api.modules.identity.service import InvalidPrincipalError
 from threat_sentinel_api.modules.scans.models import SecurityScan
 from threat_sentinel_api.modules.scans.repository import ScanRepository
 from threat_sentinel_api.modules.scans.service import ScanNotFound, ScanService
@@ -21,7 +21,8 @@ from threat_sentinel_api.modules.tenants.enums import (
 from threat_sentinel_api.modules.tenants.models import Organization, OrganizationMembership
 from threat_sentinel_api.modules.tenants.repository import OrganizationRepository
 from threat_sentinel_api.modules.tenants.service import (
-    OrganizationAccessDenied,
+    OrganizationPermissionDenied,
+    OrganizationScopeUnavailable,
     OrganizationService,
 )
 
@@ -172,25 +173,32 @@ def test_personal_retrieval_is_owner_scoped(
     service = service_for(engine)
 
     assert service.get_personal_scan(owner_principal, scan.id).id == scan.id
-    with pytest.raises(ScanNotFound, match="The scan was not found."):
+    with pytest.raises(ScanNotFound) as other_owner:
         service.get_personal_scan(other_principal, scan.id)
+    with pytest.raises(ScanNotFound) as missing:
+        service.get_personal_scan(owner_principal, uuid4())
+
+    assert type(other_owner.value) is type(missing.value)
+    assert str(other_owner.value) == str(missing.value)
 
 
 @pytest.mark.parametrize("operation", ["create", "list", "get"])
+@pytest.mark.parametrize("user_status", [UserStatus.SUSPENDED, UserStatus.DEACTIVATED])
 def test_personal_operations_recheck_local_user_status(
     engine: Engine,
     session: Session,
     make_user: Callable[..., User],
     operation: str,
+    user_status: UserStatus,
 ) -> None:
-    user = make_user(subject=f"inactive-personal-{operation}")
+    user = make_user(subject=f"inactive-personal-{operation}-{user_status.value}")
     principal = make_principal(session, user)
     scan = add_personal_scan(session, user)
-    user.status = UserStatus.SUSPENDED
+    user.status = user_status
     session.commit()
     service = service_for(engine)
 
-    with pytest.raises(InactiveUserError):
+    with pytest.raises(InvalidPrincipalError):
         if operation == "create":
             service.create_personal_scan(principal)
         elif operation == "list":
@@ -209,7 +217,7 @@ def test_personal_operation_rejects_missing_local_identity_without_provisioning(
         subject="missing-local-identity",
     )
 
-    with pytest.raises(InactiveUserError):
+    with pytest.raises(InvalidPrincipalError):
         service_for(engine).create_personal_scan(principal)
 
     with Session(engine) as verify_session:
@@ -241,7 +249,7 @@ def test_organization_creation_uses_local_role_and_principal_creator(
     service = service_for(engine)
 
     if not allowed:
-        with pytest.raises(OrganizationAccessDenied):
+        with pytest.raises(OrganizationPermissionDenied):
             service.create_organization_scan(principal, organization.id)
         return
 
@@ -317,7 +325,7 @@ def test_inactive_membership_denies_organization_operations(
     add_membership(session, organization, user, OrganizationRole.OWNER, membership_status)
     session.commit()
 
-    with pytest.raises(OrganizationAccessDenied):
+    with pytest.raises(OrganizationScopeUnavailable):
         service_for(engine).list_organization_scans(principal, organization.id)
 
 
@@ -338,24 +346,30 @@ def test_inactive_organization_denies_organization_operations(
     add_membership(session, organization, user, OrganizationRole.OWNER)
     session.commit()
 
-    with pytest.raises(OrganizationAccessDenied):
+    with pytest.raises(OrganizationScopeUnavailable):
         service_for(engine).create_organization_scan(principal, organization.id)
 
 
+@pytest.mark.parametrize("organization_exists", [True, False])
 def test_inactive_local_user_denies_organization_operations(
     engine: Engine,
     session: Session,
     make_user: Callable[..., User],
+    organization_exists: bool,
 ) -> None:
     user = make_user(subject="inactive-organization-user")
     principal = make_principal(session, user)
-    organization = create_organization(session, user, "inactive-organization-user")
-    add_membership(session, organization, user, OrganizationRole.OWNER)
+    if organization_exists:
+        organization = create_organization(session, user, "inactive-organization-user")
+        add_membership(session, organization, user, OrganizationRole.OWNER)
+        organization_id = organization.id
+    else:
+        organization_id = uuid4()
     user.status = UserStatus.SUSPENDED
     session.commit()
 
-    with pytest.raises(OrganizationAccessDenied):
-        service_for(engine).list_organization_scans(principal, organization.id)
+    with pytest.raises(InvalidPrincipalError):
+        service_for(engine).list_organization_scans(principal, organization_id)
 
 
 def test_nonmember_and_organization_creator_cannot_access_organization_scans(
@@ -369,7 +383,7 @@ def test_nonmember_and_organization_creator_cannot_access_organization_scans(
     add_organization_scan(session, organization, creator)
     session.commit()
 
-    with pytest.raises(OrganizationAccessDenied):
+    with pytest.raises(OrganizationScopeUnavailable):
         service_for(engine).list_organization_scans(principal, organization.id)
 
 
@@ -392,7 +406,21 @@ def test_cross_organization_and_missing_scans_raise_same_not_found(
     with pytest.raises(ScanNotFound) as missing:
         service.get_organization_scan(principal, authorized_organization.id, uuid4())
 
+    assert type(out_of_scope.value) is type(missing.value)
     assert str(out_of_scope.value) == str(missing.value)
+
+
+def test_missing_organization_is_scope_unavailable(
+    engine: Engine,
+    session: Session,
+    make_user: Callable[..., User],
+) -> None:
+    user = make_user(subject="missing-organization-scope")
+    principal = make_principal(session, user)
+    session.commit()
+
+    with pytest.raises(OrganizationScopeUnavailable):
+        service_for(engine).list_organization_scans(principal, uuid4())
 
 
 def test_each_public_operation_uses_exactly_one_uow_session(
@@ -546,9 +574,33 @@ def test_creator_identity_does_not_grant_organization_access(
     scan = add_organization_scan(session, organization, creator)
     session.commit()
 
-    with pytest.raises(OrganizationAccessDenied):
+    with pytest.raises(OrganizationScopeUnavailable):
         service_for(engine).get_organization_scan(
             principal,
             organization.id,
             scan.id,
+        )
+
+
+@pytest.mark.parametrize("mismatched_field", ["user_id", "external_identity_id"])
+def test_organization_operations_reject_principal_identity_mismatch(
+    engine: Engine,
+    session: Session,
+    make_user: Callable[..., User],
+    mismatched_field: str,
+) -> None:
+    user = make_user(subject=f"mismatched-organization-principal-{mismatched_field}")
+    principal = make_principal(session, user)
+    organization = create_organization(session, user, f"mismatch-{mismatched_field}")
+    add_membership(session, organization, user, OrganizationRole.OWNER)
+    session.commit()
+
+    values = principal.model_dump()
+    values[mismatched_field] = uuid4()
+    mismatched_principal = AuthenticatedPrincipal(**values)
+
+    with pytest.raises(InvalidPrincipalError):
+        service_for(engine).list_organization_scans(
+            mismatched_principal,
+            organization.id,
         )

@@ -63,7 +63,12 @@ This document defines engineering principles for future implementation. The curr
 - **Constrain resource lookups:** combine the resource ID and authorized personal-owner or
   organization scope in the database query; do not globally load by UUID and rely only on a later
   application-layer check. Return the same generic `404` for missing and out-of-scope resources;
-  use generic `403` when the caller can access the scope but lacks permission for the action.
+  missing/inactive organizations and memberships also produce the unavailable-scope outcome.
+  Use generic `403` when an active member can access the organization scope but lacks permission
+  for the action. If local user status or identity mapping invalidates an authenticated principal,
+  use generic `401`. Domain services express these outcomes as domain exceptions, not HTTP status
+  codes; the API layer owns their mapping to the generic HTTP error envelope. Responses must not
+  reveal resource or tenant existence, membership status, or internal authorization reasons.
   Internal audit logging may distinguish denial reasons without exposing them to clients.
 - **Own transactions explicitly:** request-scoped sessions are not implicitly committed. Mutations use `unit_of_work()` so success commits, exceptions roll back, and the session closes. Do not add blanket request-level commits.
 - **Keep identity provider-neutral:** internal users are linked to external identities by verified issuer and subject, not email. Only provider-asserted verified email metadata is recorded as verified. Provider organization roles/claims do not confer ThreatSentinel permissions.
@@ -75,6 +80,10 @@ This document defines engineering principles for future implementation. The curr
 - **Keep an auditable trail:** future security-relevant changes require protected, tenant-scoped audit events with deliberate retention and access controls.
 - **Use defense in depth:** require dependency updates, code review, automated checks, secure transport, least privilege, backups, and incident-response procedures before production use.
 - **Test security boundaries:** add threat modeling, input abuse cases, authorization and tenant-isolation tests, and secret/log redaction checks alongside the relevant features.
+
+Product scan routes remain unmounted until Phase 2C.4.7. The service-level denial taxonomy is
+already defined independently of those routes; API-layer mappings do not themselves expose scan
+operations.
 
 ## Authorization concurrency protocol and validation boundary
 

@@ -12,6 +12,14 @@ from threat_sentinel_api.db.authorization_locks import (
 from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.models import User
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
+from threat_sentinel_api.modules.identity.schemas import (
+    AuthenticatedPrincipal,
+    VerifiedUserContext,
+)
+from threat_sentinel_api.modules.identity.service import (
+    InactiveUserError,
+    InvalidPrincipalError,
+)
 from threat_sentinel_api.modules.tenants.enums import (
     MembershipStatus,
     OrganizationRole,
@@ -61,23 +69,35 @@ class OrganizationRepository:
     def find_active_membership(
         self,
         organization_id: UUID,
-        issuer: str,
-        subject: str,
+        principal: VerifiedUserContext,
     ) -> OrganizationMembership | None:
         locked_identity = IdentityRepository(self._session).lock_user_for_identity_share(
-            issuer,
-            subject,
+            principal.issuer,
+            principal.subject,
         )
         if locked_identity is None:
+            if isinstance(principal, AuthenticatedPrincipal):
+                raise InvalidPrincipalError("The authenticated principal is no longer valid.")
             return None
-        _, user = locked_identity
+        identity_id, user = locked_identity
+        if isinstance(principal, AuthenticatedPrincipal):
+            if identity_id != principal.external_identity_id or user.id != principal.user_id:
+                raise InvalidPrincipalError("The authenticated principal is no longer valid.")
         organization = lock_organization_for_share(self._session, organization_id)
         if organization is None:
+            if (
+                isinstance(principal, AuthenticatedPrincipal)
+                and user.status is not UserStatus.ACTIVE
+            ):
+                raise InactiveUserError("The linked account is not active.")
             return None
         membership = lock_membership_for_share(self._session, user.id, organization_id)
+        if user.status is not UserStatus.ACTIVE:
+            if isinstance(principal, AuthenticatedPrincipal):
+                raise InactiveUserError("The linked account is not active.")
+            return None
         if (
-            user.status is not UserStatus.ACTIVE
-            or organization.status is not OrganizationStatus.ACTIVE
+            organization.status is not OrganizationStatus.ACTIVE
             or membership is None
             or membership.status is not MembershipStatus.ACTIVE
         ):

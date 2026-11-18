@@ -90,12 +90,16 @@ No other actions are approved. See the [authorization decision](./decisions.md#i
 for the complete matrix and denial/transaction rules.
 
 The server determines ownership and scope. Data access constrains resource ID and authorized scope
-together; a missing resource and an out-of-scope resource return the same generic `404`. Permission
-denial for an in-scope resource returns a generic `403`. The service performs authorization and
-scan access in one unit of work with PostgreSQL row locks. Tenant dependency checks have separate,
-short UOWs; their resulting context is not authorization for later handler resource access.
+together. Domain exceptions distinguish missing or inaccessible resources/scopes (`404`), active
+members denied an action (`403`), and a principal invalidated by local status or identity-mapping
+revalidation (`401`). Domain services do not return HTTP statuses; the API layer maps these
+outcomes to the generic HTTP error envelope without exposing authorization details. The service
+performs authorization and scan access in one unit of work with PostgreSQL row locks. Tenant
+dependency checks have separate, short UOWs; their resulting context is not authorization for later
+handler resource access.
 Protected product routes must continue to remain unmounted until implementation, PostgreSQL
 validation in local and CI environments, review, and deployment-specific conditions are satisfied.
+Scan routes remain unmounted until Phase 2C.4.7.
 See the
 [authorization transaction and concurrency protocol](./decisions.md#authorization-transaction-and-concurrency-protocol-implemented-postgresql-integration-tests).
 

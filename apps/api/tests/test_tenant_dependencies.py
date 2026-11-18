@@ -24,6 +24,7 @@ from threat_sentinel_api.modules.identity.schemas import (
     VerifiedUserContext,
 )
 from threat_sentinel_api.modules.identity.service import IdentityService
+from threat_sentinel_api.modules.scans.service import ScanNotFound
 from threat_sentinel_api.modules.tenants.authorization import OrganizationScanAction
 from threat_sentinel_api.modules.tenants.context import ActiveOrganizationContext
 from threat_sentinel_api.modules.tenants.enums import (
@@ -69,6 +70,10 @@ def client() -> Iterator[TestClient]:
         ],
     ) -> dict[str, str]:
         return context_response(context)
+
+    @app.get("/scans/missing")
+    def missing_scan() -> None:
+        raise ScanNotFound("private scan identifier")
 
     def register_scan_action_route(
         action: OrganizationScanAction,
@@ -431,7 +436,7 @@ def test_missing_suspended_or_removed_membership_is_denied_without_provisioning(
 
     response = client.get(f"/organizations/{organization_id}/scans/read")
 
-    assert response.status_code == 403
+    assert response.status_code == 404
     assert response.json() == {
         "error": {
             "code": "http_error",
@@ -474,7 +479,7 @@ def test_membership_in_another_organization_does_not_authorize_target(
 
     response = client.get(f"/organizations/{target_organization_id}/scans/read")
 
-    assert response.status_code == 403
+    assert response.status_code == 404
     assert response.json()["error"]["message"] == "The request could not be completed."
     assert sessions[0].closed_by_dependency
 
@@ -495,7 +500,7 @@ def test_missing_organization_is_indistinguishable_from_other_access_denials(
 
     response = client.get(f"/organizations/{uuid4()}/scans/read")
 
-    assert response.status_code == 403
+    assert response.status_code == 404
     assert response.json()["error"]["message"] == "The request could not be completed."
     assert sessions[0].closed_by_dependency
 
@@ -531,16 +536,18 @@ def test_inactive_organization_is_denied_generically(
 
     response = client.get(f"/organizations/{organization_id}/scans/read")
 
-    assert response.status_code == 403
+    assert response.status_code == 404
     assert "suspended" not in response.text
     assert len(sessions) == 1
     assert sessions[0].closed_by_dependency
 
 
+@pytest.mark.parametrize("user_status", [UserStatus.SUSPENDED, UserStatus.DEACTIVATED])
 def test_inactive_local_user_is_denied_even_with_active_membership(
     client: TestClient,
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
+    user_status: UserStatus,
 ) -> None:
     sessions: list[TrackingSession] = []
     with Session(engine, expire_on_commit=False) as setup_session:
@@ -556,7 +563,7 @@ def test_inactive_local_user_is_denied_even_with_active_membership(
         )
         setup_session.commit()
         organization_id = organization.id
-        member.status = UserStatus.SUSPENDED
+        member.status = user_status
         setup_session.commit()
 
     _override_principal(client, principal)
@@ -564,10 +571,64 @@ def test_inactive_local_user_is_denied_even_with_active_membership(
 
     response = client.get(f"/organizations/{organization_id}/scans/read")
 
-    assert response.status_code == 403
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
     assert "suspended" not in response.text
     assert len(sessions) == 1
     assert sessions[0].closed_by_dependency
+
+
+def test_relinked_identity_mapping_returns_generic_unauthorized(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[TrackingSession] = []
+    with Session(engine, expire_on_commit=False) as setup_session:
+        member, principal = _create_user(setup_session, "mismatched-principal")
+        organization = _create_organization(setup_session, "owner", "mismatched-principal-org")
+        setup_session.add(
+            OrganizationMembership(
+                organization=organization,
+                user=member,
+                role=OrganizationRole.MEMBER,
+                status=MembershipStatus.ACTIVE,
+            )
+        )
+        identity = setup_session.get(ExternalIdentity, principal.external_identity_id)
+        assert identity is not None
+        identity.subject = "relinked-principal-subject"
+        setup_session.commit()
+        organization_id = organization.id
+
+    _override_principal(client, principal)
+    _use_database(client, monkeypatch, engine, sessions)
+
+    response = client.get(f"/organizations/{organization_id}/protected")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json() == {
+        "error": {
+            "code": "http_error",
+            "message": "The request could not be completed.",
+        }
+    }
+    assert str(organization_id) not in response.text
+    assert sessions[0].closed_by_dependency
+
+
+def test_scan_not_found_maps_to_generic_http_404(client: TestClient) -> None:
+    response = client.get("/scans/missing")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "http_error",
+            "message": "The request could not be completed.",
+        }
+    }
+    assert "private scan identifier" not in response.text
 
 
 def test_unauthenticated_request_keeps_generic_bearer_challenge(client: TestClient) -> None:

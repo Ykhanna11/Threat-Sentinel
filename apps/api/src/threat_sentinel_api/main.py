@@ -11,6 +11,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from threat_sentinel_api.api.v1.router import api_router
 from threat_sentinel_api.core.config import get_settings
 from threat_sentinel_api.core.logging import configure_logging, get_logger
+from threat_sentinel_api.modules.identity.service import InvalidPrincipalError
+from threat_sentinel_api.modules.scans.service import ScanNotFound
+from threat_sentinel_api.modules.tenants.service import (
+    OrganizationPermissionDenied,
+    OrganizationScopeUnavailable,
+)
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -87,6 +93,55 @@ async def http_error_handler(_: Request, exc: StarletteHTTPException) -> JSONRes
                 "message": "The request could not be completed.",
             }
         },
+    )
+
+
+def _authorization_error_response(
+    status_code: int,
+    *,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        headers=headers,
+        content={
+            "error": {
+                "code": "http_error",
+                "message": "The request could not be completed.",
+            }
+        },
+    )
+
+
+@app.exception_handler(ScanNotFound)
+async def scan_not_found_handler(_: Request, _exc: ScanNotFound) -> JSONResponse:
+    return _authorization_error_response(404)
+
+
+@app.exception_handler(OrganizationScopeUnavailable)
+async def organization_scope_unavailable_handler(
+    _: Request,
+    _exc: OrganizationScopeUnavailable,
+) -> JSONResponse:
+    return _authorization_error_response(404)
+
+
+@app.exception_handler(OrganizationPermissionDenied)
+async def organization_permission_denied_handler(
+    _: Request,
+    _exc: OrganizationPermissionDenied,
+) -> JSONResponse:
+    return _authorization_error_response(403)
+
+
+@app.exception_handler(InvalidPrincipalError)
+async def invalid_principal_handler(
+    _: Request,
+    _exc: InvalidPrincipalError,
+) -> JSONResponse:
+    return _authorization_error_response(
+        401,
+        headers={"WWW-Authenticate": "Bearer"},
     )
 
 

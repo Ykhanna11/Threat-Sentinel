@@ -21,7 +21,7 @@ from threat_sentinel_api.modules.identity.schemas import (
     AuthenticatedPrincipal,
     VerifiedAccessTokenClaims,
 )
-from threat_sentinel_api.modules.identity.service import IdentityService, InactiveUserError
+from threat_sentinel_api.modules.identity.service import IdentityService, InvalidPrincipalError
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -109,5 +109,5 @@ async def get_current_principal(
 
     try:
         return await asyncio.to_thread(_resolve_principal, claims, service_factory)
-    except InactiveUserError:
+    except InvalidPrincipalError:
         raise _unauthorized() from None

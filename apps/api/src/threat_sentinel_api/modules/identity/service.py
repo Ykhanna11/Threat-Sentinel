@@ -10,7 +10,11 @@ from threat_sentinel_api.modules.identity.schemas import (
 )
 
 
-class InactiveUserError(PermissionError):
+class InvalidPrincipalError(PermissionError):
+    """Raised when an authenticated principal no longer matches an active local identity."""
+
+
+class InactiveUserError(InvalidPrincipalError):
     """Raised when an external identity is linked to a non-active local user."""
 
 
@@ -26,13 +30,13 @@ class IdentityService:
                 context.subject,
             )
             if locked_identity is None:
-                raise InactiveUserError("The linked account is not active.")
+                raise InvalidPrincipalError("The authenticated principal is no longer valid.")
             identity_id, user = locked_identity
             if user.status is not UserStatus.ACTIVE:
                 raise InactiveUserError("The linked account is not active.")
             identity = self._repository.find_by_issuer_subject(context.issuer, context.subject)
             if identity is None or identity.id != identity_id or identity.user_id != user.id:
-                raise InactiveUserError("The linked account is not active.")
+                raise InvalidPrincipalError("The authenticated principal is no longer valid.")
             self._refresh_email_metadata(identity, context)
             return user
 
@@ -66,10 +70,10 @@ class IdentityService:
             or identity_link is None
             or identity_link[1] != user.id
         ):
-            raise RuntimeError("Resolved identity could not be loaded.")
+            raise InvalidPrincipalError("The authenticated principal is no longer valid.")
         identity = self._repository.find_by_issuer_subject(context.issuer, context.subject)
         if identity is None or identity.id != identity_link[0] or identity.user_id != user.id:
-            raise RuntimeError("Resolved identity could not be loaded.")
+            raise InvalidPrincipalError("The authenticated principal is no longer valid.")
 
         return AuthenticatedPrincipal(
             user_id=user.id,

@@ -1,17 +1,26 @@
 from uuid import UUID
 
 from threat_sentinel_api.modules.identity.schemas import VerifiedUserContext
+from threat_sentinel_api.modules.identity.service import InvalidPrincipalError
 from threat_sentinel_api.modules.tenants.models import Organization, OrganizationMembership
 from threat_sentinel_api.modules.tenants.repository import OrganizationRepository
 from threat_sentinel_api.modules.tenants.schemas import OrganizationCreate
 
 
-class ActiveUserRequired(PermissionError):
+class ActiveUserRequired(InvalidPrincipalError):
     """Raised when an inactive or unknown user attempts an organization operation."""
 
 
 class OrganizationAccessDenied(PermissionError):
-    """Raised when the authenticated user has no active access to an organization."""
+    """Compatibility base for organization scope and action denials."""
+
+
+class OrganizationScopeUnavailable(OrganizationAccessDenied):
+    """Raised when the requested organization scope is missing or inaccessible."""
+
+
+class OrganizationPermissionDenied(OrganizationAccessDenied):
+    """Raised when an active organization member lacks permission for an action."""
 
 
 class OrganizationService:
@@ -42,9 +51,8 @@ class OrganizationService:
     ) -> OrganizationMembership:
         membership = self._repository.find_active_membership(
             organization_id,
-            principal.issuer,
-            principal.subject,
+            principal,
         )
         if membership is None:
-            raise OrganizationAccessDenied("The user does not have active organization access.")
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
         return membership

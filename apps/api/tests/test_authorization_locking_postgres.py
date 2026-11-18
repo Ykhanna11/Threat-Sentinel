@@ -496,10 +496,9 @@ def test_missing_membership_locks_organization_and_serializes_creation(
     def pause_after_missing_membership(
         repository: OrganizationRepository,
         resource_id: UUID,
-        issuer: str,
-        subject: str,
+        principal: VerifiedUserContext,
     ) -> OrganizationMembership | None:
-        membership = original_find(repository, resource_id, issuer, subject)
+        membership = original_find(repository, resource_id, principal)
         assert membership is None
         _pause_authorization(repository._session, ready, release, reader_pid)
         return None

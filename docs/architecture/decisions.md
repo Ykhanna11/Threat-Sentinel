@@ -83,6 +83,16 @@ alone does not prevent authorization-state races. No role hierarchy, implicit pe
 inheritance, or authorization caching is used. Product routes remain unmounted pending review,
 required CI validation, and deployment-specific security work.
 
+Domain services classify denials without returning HTTP status codes. `ScanNotFound` and
+`OrganizationScopeUnavailable` represent missing or inaccessible resources/scopes and map to a
+generic `404` in the API layer. `OrganizationPermissionDenied` represents an active member's
+disallowed action and maps to a generic `403`. `InvalidPrincipalError` (including inactive-user
+and identity-mapping revalidation failures) maps to a generic `401` with the bearer challenge.
+These responses use the standard generic HTTP error envelope and do not disclose resource,
+organization, membership, or internal denial details. The specific exceptions preserve their
+outcome distinction; the compatibility `OrganizationAccessDenied` base is not itself mapped.
+Product scan routes remain unmounted until Phase 2C.4.7.
+
 ### Authorization transaction and concurrency protocol (implemented; PostgreSQL integration tests)
 
 The implementation uses PostgreSQL's default transaction isolation. PostgreSQL 17 is the local

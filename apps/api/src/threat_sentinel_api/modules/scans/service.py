@@ -15,7 +15,7 @@ from threat_sentinel_api.modules.tenants.authorization import (
 )
 from threat_sentinel_api.modules.tenants.repository import OrganizationRepository
 from threat_sentinel_api.modules.tenants.service import (
-    OrganizationAccessDenied,
+    OrganizationPermissionDenied,
     OrganizationService,
 )
 
@@ -136,6 +136,6 @@ class ScanService:
             organization_id,
         )
         if not allows_organization_scan_action(membership.role, action):
-            raise OrganizationAccessDenied(
+            raise OrganizationPermissionDenied(
                 "The user is not authorized for this organization scan action."
             )
