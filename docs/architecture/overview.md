@@ -37,13 +37,22 @@ The API currently exposes only liveness and readiness checks. The database URL r
 - Optional verifier settings are loaded out of band from the environment. The expected issuer,
   audience, trusted HTTPS JWKS URL, and explicit signing-algorithm allowlist must be configured as
   a complete set. These values are not accepted from tokens or requests, and configuring them
-  alone does not activate authentication; cryptographic verification remains future work.
+  alone does not activate authentication.
 - `VerifiedUserContext` remains the Phase 2A internal issuer/subject and email-metadata contract
   used by identity and tenancy services; it is neither an untrusted request schema nor proof of
   token verification. `IdentityService.resolve_authenticated_principal()` resolves verified
   claims to an active local user and returns an immutable `AuthenticatedPrincipal` containing
-  local and external identity IDs. That principal is not an authorization grant. JWT verification,
-  OIDC discovery/JWKS handling, and authentication routes are not implemented.
+  local and external identity IDs. That principal is not an authorization grant.
+- `JwtAccessTokenVerifier` validates compact JWTs whose protected header has `typ: at+jwt`.
+  It validates signatures only with compatible keys from the configured JWKS endpoint and only
+  with configured asymmetric algorithms; issuer, audience, required time claims, subject, and
+  optional email metadata are validated before returning `VerifiedAccessTokenClaims`. The
+  standalone verifier is not wired to API routes or dependencies. OIDC discovery and login flows
+  are not implemented.
+- `TrustedJwksKeyStore` rejects non-public DNS answers, pins HTTPS connections to validated IP
+  addresses while retaining TLS hostname verification, does not follow redirects, uses three
+  second connection/read timeouts, limits JWKS responses to 64 KiB, and caps cached keys using
+  configuration. Refreshes are throttled, including requests for unknown key IDs.
 - `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial coarse roles; fine-grained and custom permission policies remain future work.
 - `OrganizationService` requires a `VerifiedUserContext`, resolves it to a local user by issuer and subject, then checks the active organization and membership in the database. A caller-supplied organization UUID alone is not an authorization check. Provider organization roles or claims are not consumed as application permissions.
 - Pending invitations have a database-enforced unique key per organization and normalized email (lowercase and trimmed); terminal invitations do not block reissue. Invitation delivery and state-transition endpoints are not implemented.
@@ -65,4 +74,4 @@ These are application and persistence foundations, not a complete authentication
 
 ## Planned, not implemented
 
-Token verification, public authentication/tenant APIs, invitation delivery and acceptance, fine-grained permissions, detection, risk assessment, AI inference, investigations, intelligence feeds, billing, developer integrations, security audit storage, and production deployment are future capabilities. The identity and tenancy records and service boundaries described above are implemented foundations, not completed product capabilities.
+Authentication routes/dependencies, OIDC discovery and browser flows, invitation delivery and acceptance, fine-grained permissions, detection, risk assessment, AI inference, investigations, intelligence feeds, billing, developer integrations, security audit storage, and production deployment are future capabilities. The identity and tenancy records and service boundaries described above are implemented foundations, not completed product capabilities.

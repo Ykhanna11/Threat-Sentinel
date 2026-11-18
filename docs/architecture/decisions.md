@@ -16,7 +16,7 @@ These decisions are the approved foundation for the initial project scaffold. Th
 | AI | Future multi-provider design with local and cloud inference adapters; no vendor dependency is introduced. |
 | Service topology | A modular monolith until demonstrated scaling or operational requirements justify extraction. No Kubernetes or speculative microservices. |
 | Identity key | Internal users have stable UUIDs; external accounts map by the exact verified `(issuer, subject)` pair. Email is mutable metadata, not an account key or linking mechanism. |
-| Authentication boundary | Keep untrusted bearer credentials, verifier-produced access-token claims, resolved local application identity, and authorization decisions separate. The provider-neutral adapter returns only the minimal typed verified claims; local identity resolution produces a principal only for an active user. Issuer, audience, JWKS URL, and allowed algorithms are trusted out-of-band settings and must be configured together. Their presence does not activate authentication; cryptographic verification is deferred to Task 2B.3. |
+| Authentication boundary | Keep untrusted bearer credentials, verifier-produced access-token claims, resolved local application identity, and authorization decisions separate. The provider-neutral adapter returns only the minimal typed verified claims; local identity resolution produces a principal only for an active user. Issuer, audience, JWKS URL, and allowed algorithms are trusted out-of-band settings and must be configured together. A standalone verifier implements JWT access-token verification, but no HTTP route or authentication dependency consumes it yet. |
 | Tenant authorization | Organizations and memberships are application-owned database records. Access requires an active local user, organization, and membership; identity-provider organization roles/claims do not grant application permissions. |
 | Transaction ownership | Request-scoped `get_session()` does not commit implicitly. Mutating application operations own a transaction and cleanup through `unit_of_work()`. |
 | Invitations | A partial unique index permits only one pending invitation per organization and normalized email; terminal invitations may be reissued. Invitations can reference only a membership in the same organization. No delivery or bearer-token mechanism is implemented. |
@@ -36,9 +36,16 @@ These decisions are the approved foundation for the initial project scaffold. Th
   subject, audience, timezone-aware issuance and expiration, optional not-before, key ID, email
   metadata, and token type. It contains no raw token or arbitrary provider claims; extra
   role/permission claims are rejected. The type itself does not verify a token.
-- Authentication verifier settings are optional until verification is implemented, but issuer,
-  audience, HTTPS JWKS URL, and explicit supported algorithms must be supplied together. The
-  settings validate trusted inputs; they do not enable authentication or make a token trustworthy.
+- Authentication verifier settings are optional while the verifier is not wired into the API, but
+  issuer, audience, HTTPS JWKS URL, and explicit supported algorithms must be supplied together.
+  The settings validate trusted inputs; they do not enable authentication or make a token
+  trustworthy.
+- The standalone verifier accepts only compact JWT access tokens with the RFC 9068 `at+jwt` type
+  marker, using keys from the configured JWKS URL and the configured algorithm allowlist. It pins
+  HTTPS requests to resolved public IP addresses, rejects redirects, bounds response size and
+  timeouts, and limits key refreshes. The verifier is not wired into FastAPI. PyJWT (MIT) and its
+  `cryptography` dependency (Apache-2.0/BSD-3-Clause) are free/open-source and add no provider or
+  paid service.
 - Repository/service writes must be grouped in `unit_of_work()`; request session cleanup does not imply a commit.
 - Persistence models are internal and must not be exposed directly as public API response contracts.
 - Product security and privacy decisions must precede collection or processing of user-provided threat evidence.
