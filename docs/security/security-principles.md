@@ -6,8 +6,8 @@ This document defines engineering principles for future implementation. The curr
 - **Establish trust boundaries:** the HTTP bearer credential is untrusted input. Only a successful
   `JwtAccessTokenVerifier` call may produce `VerifiedAccessTokenClaims`; only local identity
   resolution of those claims may produce an `AuthenticatedPrincipal` for an active user. The
-  reusable FastAPI dependency performs these steps separately and is not attached to product
-  routes.
+  reusable FastAPI dependency performs these steps separately and is attached to protected scan
+  persistence routes.
   `VerifiedUserContext` remains an internal Phase 2A identity-service/tenancy contract, not proof
   of verification. Never construct trusted claims or principals from request data.
 - **Separate authorization:** a verified token and authenticated local principal do not themselves
@@ -50,7 +50,11 @@ This document defines engineering principles for future implementation. The curr
   verifier errors as `AuthenticationVerifierFailure`. Missing, malformed, unsupported, or empty
   bearer credentials receive a generic `401` with a `WWW-Authenticate: Bearer` challenge.
   Operational failures fail closed and are never reported as successful authentication.
-- **Authorize server-side:** the tenancy service requires an active local user and active database membership for the requested organization; an organization ID alone grants no access. Future protected routes must invoke this boundary and test cross-tenant denial.
+- **Authorize server-side:** each organization scan service operation validates the active local
+  user and active database membership for its requested organization in the same UOW as scan
+  access; an organization ID alone grants no access. Future protected routes must delegate to an
+  authorized service and test cross-tenant denial rather than using a separate dependency check as
+  authorization for later resource access.
 - **Scope the first product resource:** Website/Domain Security Scans each belong to
   exactly one personal or organization scope. Authenticated users may create personal scans, whose
   ownership comes from the authenticated principal, never a client-supplied owner ID; personal scans
@@ -58,8 +62,9 @@ This document defines engineering principles for future implementation. The curr
   scans require an active local user, active organization, and active local membership. The approved
   role matrix allows `OWNER`, `ADMIN`, and `MEMBER` to create organization scans;
   `VIEWER` is denied creation; all four may read and list organization scans. No other actions are
-  approved; see the [architecture decision](../architecture/decisions.md#initial-website-domain-security-scan-authorization-service-implemented-routes-unmounted).
-  The service enforces this policy, but no current product route is mounted.
+  approved; see the [architecture decision](../architecture/decisions.md#initial-website-domain-security-scan-authorization-service-and-protected-routes-implemented).
+  The scan service enforces this policy, and protected persistence routes expose only these
+  operations. Scan execution and analysis are not implemented.
 - **Constrain resource lookups:** combine the resource ID and authorized personal-owner or
   organization scope in the database query; do not globally load by UUID and rely only on a later
   application-layer check. Return the same generic `404` for missing and out-of-scope resources;
@@ -81,9 +86,8 @@ This document defines engineering principles for future implementation. The curr
 - **Use defense in depth:** require dependency updates, code review, automated checks, secure transport, least privilege, backups, and incident-response procedures before production use.
 - **Test security boundaries:** add threat modeling, input abuse cases, authorization and tenant-isolation tests, and secret/log redaction checks alongside the relevant features.
 
-Product scan routes remain unmounted until Phase 2C.4.7. The service-level denial taxonomy is
-already defined independently of those routes; API-layer mappings do not themselves expose scan
-operations.
+The six product scan persistence routes are mounted under `/api/v1`. The service-level denial
+taxonomy remains authoritative; API-layer mappings do not replace service authorization.
 
 ## Authorization concurrency protocol and validation boundary
 
@@ -146,13 +150,15 @@ success does not establish CI success, production deployment, or production read
 the PostgreSQL marker separately; its result must be checked independently. This lock protocol
 requires no migration.
 
-Protected product routes must remain unmounted until the relevant implementation and PostgreSQL
-validation have been reviewed and the required CI checks and deployment-specific conditions are
-met. See the [architecture decision](../architecture/decisions.md#authorization-transaction-and-concurrency-protocol-implemented-postgresql-integration-tests).
+The protected scan persistence routes delegate to the scan service, which authorizes and accesses
+the resource within one UOW. Any future protected route or authorization-state writer must satisfy
+the locking protocol before exposure. See the
+[architecture decision](../architecture/decisions.md#authorization-transaction-and-concurrency-protocol-implemented-postgresql-integration-tests).
 
-The repository now has a standalone JWT access-token verifier, a reusable FastAPI authentication
-dependency, and a reusable tenant membership dependency. The tenant dependency uses the existing
-active membership check in a short unit-of-work transaction; it is not attached to product routes.
+The repository has a standalone JWT access-token verifier, a reusable FastAPI authentication
+dependency, a reusable tenant membership dependency, and authenticated scan-persistence routes.
+The tenant dependency uses the existing active-membership check in a short unit-of-work
+transaction; scan routes do not use that separate result as authorization input.
 Liveness remains independent of database and authentication configuration. Readiness reports
 database status and local authentication-configuration completeness, but does not initialize the
 verifier or probe live provider/JWKS availability. A previously unknown external identity may
@@ -165,7 +171,7 @@ verification by themselves. OIDC discovery, browser login/logout, refresh sessio
 revocation, invitation delivery, membership mutation/owner transfer, a general RBAC framework
 beyond the implemented service-level scan authorization policy, audit event storage, rate limiting,
 and production secrets integration remain unimplemented. Service-level authorization is
-implemented for the documented scan actions, but product HTTP routes remain unmounted. These
+implemented for the documented scan actions, and protected persistence routes are mounted. These
 foundations are not a production security control set.
 
 The verifier uses the configured JWKS URL directly; it does not perform OIDC discovery. The

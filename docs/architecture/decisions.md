@@ -16,7 +16,7 @@ These decisions are the approved foundation for the initial project scaffold. Th
 | AI | Future multi-provider design with local and cloud inference adapters; no vendor dependency is introduced. |
 | Service topology | A modular monolith until demonstrated scaling or operational requirements justify extraction. No Kubernetes or speculative microservices. |
 | Identity key | Internal users have stable UUIDs; external accounts map by the exact verified `(issuer, subject)` pair. Email is mutable metadata, not an account key or linking mechanism. |
-| Authentication boundary | Keep untrusted bearer credentials, verifier-produced access-token claims, resolved local application identity, and authorization decisions separate. The provider-neutral adapter returns only the minimal typed verified claims; local identity resolution produces a principal only for an active user. Issuer, audience, JWKS URL, and allowed algorithms are trusted out-of-band settings and must be configured together. JWT verification and reusable FastAPI authentication and tenant dependencies are implemented, but no application product route currently consumes them. |
+| Authentication boundary | Keep untrusted bearer credentials, verifier-produced access-token claims, resolved local application identity, and authorization decisions separate. The provider-neutral adapter returns only the minimal typed verified claims; local identity resolution produces a principal only for an active user. Issuer, audience, JWKS URL, and allowed algorithms are trusted out-of-band settings and must be configured together. JWT verification and reusable FastAPI authentication and tenant dependencies are implemented. The protected scan routes consume authentication; the scan service owns authorization. |
 | Tenant authorization | Authorization uses local user identity, active local membership, locally assigned organization role, and resource scope. Current reader paths serialize against authorization-state writers with PostgreSQL row locks. Provider-supplied roles, permissions, or organization claims never grant local access. No role hierarchy, implicit permission inheritance, or authorization caching is introduced. |
 | Transaction ownership | Request-scoped `get_session()` does not commit implicitly. Scan and principal-resolution application operations use one `unit_of_work()`. Organization service/repository methods remain transaction-neutral; their caller must own one UOW spanning active-user validation, locks, and writes. |
 | Invitations | A partial unique index permits only one pending invitation per organization and normalized email; terminal invitations may be reissued. Invitations can reference only a membership in the same organization. No delivery or bearer-token mechanism is implemented. |
@@ -25,21 +25,27 @@ These decisions are the approved foundation for the initial project scaffold. Th
 ## Consequences
 
 - `/api/v1` is the HTTP API version boundary.
-- `DATABASE_URL` is optional for health-only startup; database-backed operations require explicit readiness, failure, and migration behavior.
-- Authentication configuration is optional for the current health-only API. Readiness reports whether the local authentication settings are configured; it does not check JWKS or provider availability.
+- `DATABASE_URL` is optional at startup; database-backed operations require explicit readiness, failure, and migration behavior.
+- Authentication configuration is optional at startup. Readiness reports whether local authentication settings are configured; it does not check JWKS or provider availability. Protected scan routes fail closed when authentication configuration is absent.
 - Future shared TypeScript contracts should describe API boundaries, not reimplement backend rules.
 - External identity resolution uses the exact `(issuer, subject)` pair. A previously unknown verified identity may create a local user and external identity mapping, but this provisioning creates no organization or membership. Organization creation explicitly grants the creator the initial owner membership.
-- Authentication verification, local identity resolution, and tenant authorization are separate reusable dependencies/contracts. No application product route currently mounts them.
-- The first product resource is a Website/Domain Security Scan. Its model, scoped repository, and lock-protected authorization-aware service exist; production routes and a scanning engine are not implemented.
+- Authentication verification, local identity resolution, and tenant authorization are separate
+  reusable dependencies/contracts. The protected scan API mounts authentication; scan
+  authorization remains in the scan service and does not rely on the tenant dependency's separate
+  UOW.
+- The first product resource is a Website/Domain Security Scan. Its model, scoped repository,
+  lock-protected authorization-aware service, and protected persistence routes are implemented;
+  scan execution and analysis are not.
 - `VerifiedUserContext` remains the Phase 2A issuer/subject and email-metadata contract used by
   existing identity and tenancy services; it is not a bearer credential or proof of token
   verification. The reusable authentication dependency produces `AuthenticatedPrincipal` only
   after successful token verification and active local identity resolution.
 - `VerifiedAccessTokenClaims` is an internal minimal verifier-output contract: exact issuer and
   subject, audience, timezone-aware issuance and expiration, optional not-before, key ID, email
-  metadata, and token type. It contains no raw token or arbitrary provider claims; extra
-  role/permission claims are rejected. The type itself does not verify a token.
-- Authentication verifier settings are optional for the current health-only API, but issuer,
+  metadata, and token type. It contains no raw token or arbitrary provider claims; provider-supplied
+  organization, role, permission, membership, and group claims are not included in verifier output.
+  The type itself does not verify a token.
+- Authentication verifier settings are optional at application startup, but issuer,
   audience, HTTPS JWKS URL, and explicit supported algorithms must be supplied together. Missing
   configuration causes a generic 503 when the authentication dependency is invoked. The settings
   validate trusted inputs; they do not enable authentication or make a token trustworthy.
@@ -47,15 +53,16 @@ These decisions are the approved foundation for the initial project scaffold. Th
   marker, using keys from the configured JWKS URL and the configured algorithm allowlist. It pins
   HTTPS requests to resolved public IP addresses, rejects redirects, bounds response size and
   timeouts, and limits key refreshes. A reusable authentication dependency invokes the verifier,
-  and a reusable tenant dependency checks local active membership; no application product route
-  currently mounts them. PyJWT (MIT) and its
+  and a reusable tenant dependency checks local active membership. The protected scan routes consume
+  the authentication dependency, while service operations authorize organization scope within
+  their own UOW. PyJWT (MIT) and its
   `cryptography` dependency (Apache-2.0/BSD-3-Clause) are free/open-source and add no provider or
   paid service.
 - Repository/service writes must be grouped in exactly one application-boundary-owned `unit_of_work()`; request session cleanup does not imply a commit. Scan and principal-resolution operations currently own one UOW each. Organization creation has no production route, so any future caller must provide this boundary.
 - Persistence models are internal and must not be exposed directly as public API response contracts.
 - Product security and privacy decisions must precede collection or processing of user-provided threat evidence.
 
-### Initial Website/Domain Security Scan authorization (service implemented; routes unmounted)
+### Initial Website-Domain Security Scan authorization (service and protected routes implemented)
 
 Each scan belongs to exactly one logical access scope: a personal workspace or an organization
 workspace. The creator/audit identity is distinct from the authorization scope. The server assigns
@@ -80,8 +87,9 @@ operations enforce this policy inside one unit of work. Personal operations lock
 and revalidate the local user and exact external identity mapping. Organization operations lock
 and validate the user, organization, and membership in canonical order. A shared transaction
 alone does not prevent authorization-state races. No role hierarchy, implicit permission
-inheritance, or authorization caching is used. Product routes remain unmounted pending review,
-required CI validation, and deployment-specific security work.
+inheritance, or authorization caching is used. The six persistence routes are mounted only after
+the route layer, service authorization, error mapping, and HTTP integration tests were implemented.
+This does not claim production readiness or deployment-specific security approval.
 
 Domain services classify denials without returning HTTP status codes. `ScanNotFound` and
 `OrganizationScopeUnavailable` represent missing or inaccessible resources/scopes and map to a
@@ -91,7 +99,8 @@ and identity-mapping revalidation failures) maps to a generic `401` with the bea
 These responses use the standard generic HTTP error envelope and do not disclose resource,
 organization, membership, or internal denial details. The specific exceptions preserve their
 outcome distinction; the compatibility `OrganizationAccessDenied` base is not itself mapped.
-Product scan routes remain unmounted until Phase 2C.4.7.
+Product scan routes use these handlers and are mounted under `/api/v1`; no scan execution,
+findings, or analysis capabilities are exposed.
 
 ### Authorization transaction and concurrency protocol (implemented; PostgreSQL integration tests)
 
@@ -170,7 +179,38 @@ runtime row locks; no schema migration is required. SQLite tests remain useful f
 do not establish lock correctness. PostgreSQL integration tests use independent connections,
 events, bounded waits, and `pg_blocking_pids()` diagnostics to verify lock blocking, ordering,
 writer-first observations, listing consistency, principal freshness, organization creation, and
-rollback/lock release. The repository CI workflow runs the PostgreSQL marker separately; only
-actual CI results validate that workflow. Product routes must remain unmounted until the relevant
-implementation, local and CI PostgreSQL validation, review, and deployment-specific conditions
-are met.
+rollback/lock release. The repository CI workflow runs the PostgreSQL marker separately; only actual CI results validate
+that workflow. Protected scan persistence routes are mounted after route implementation and HTTP
+integration tests. Local and CI PostgreSQL results must be recorded independently; route mounting
+does not imply production security readiness. Future product routes must meet their own
+implementation, validation, review, and deployment-specific requirements before exposure.
+
+## Phase 2C milestone crosswalk
+
+The overlapping API and security milestones are satisfied by one implementation and one
+validation workstream; no duplicate routes or audits were added. Status below records this local
+execution and does not assert a remote CI run or production readiness.
+
+| Milestone | Status | Implementation and evidence |
+| --- | --- | --- |
+| 2C.4.6.2 | Complete | Personal ownership is assigned from the authenticated local principal and tested at service and HTTP layers, including cross-user and missing-scan equivalence. |
+| 2C.4.6.3 | Complete | Organization role/action matrix, active and unavailable membership/scope cases, role changes, and local-role authority are covered by service and HTTP tests. |
+| 2C.4.6.4 | Complete | Generic 401/403/404 response envelopes, relevant headers, and cross-scope non-disclosure are tested. |
+| 2C.4.6.5 | Complete | Registered HTTP exception handlers and provider-claim negatives are tested, including bearer challenge behavior. |
+| 2C.4.6.6 | Complete | Architecture and security documentation now state current behavior, capability limits, denial policy, and locking requirements. |
+| 2C.4.7 | Complete | The protected scan API integration is the same six service-backed endpoints described under 2C.5. |
+| 2C.4.8 | Complete (local validation) | Source-level authorization regression and PostgreSQL 17 integration tests passed; this is not a penetration test. |
+| 2C.5 | Complete | The versioned API exposes the six protected persistence operations; routes use authentication and the scan service's single-UOW authorization boundary. |
+| 2C.6 | Complete (local validation) | Full non-PostgreSQL and PostgreSQL suites, migration consistency, Ruff, Mypy, project validation, and OpenAPI checks passed. |
+
+Validation in this execution: 336 API tests passed outside the PostgreSQL marker and 12 PostgreSQL
+17 integration tests passed. Alembic reported revision `0557465b3944` as the sole head and
+`alembic check` found no new upgrade operations. Ruff check/format, Mypy, repository validation,
+and route/OpenAPI tests passed. No frontend files changed, so frontend build/lint/typecheck were
+not run. The dedicated local test container was disposable; no development database was used.
+The repository's separate remote CI workflow and deployment-specific security review were not run
+or claimed.
+
+There are no outstanding Phase 2C implementation items in this crosswalk. Phase 2D lifecycle
+capabilities remain explicitly unimplemented; future authorization-state writers must follow the
+locking protocol above.

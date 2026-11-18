@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 import jwt
 import pytest
@@ -180,15 +181,41 @@ def test_valid_access_token_returns_verified_minimal_claims() -> None:
     assert claims.subject == "subject-123"
 
 
-def test_provider_roles_and_permissions_are_not_returned_as_authorization() -> None:
+def test_provider_authorization_claims_are_not_returned_as_authorization() -> None:
     private_key = _rsa_key()
     verifier, _ = _verifier(private_key)
-    token = _token(private_key, roles=["admin"], permissions=["*"])
+    token = _token(
+        private_key,
+        organization_id=str(uuid4()),
+        org_id=str(uuid4()),
+        organizations=[{"id": str(uuid4()), "role": "owner"}],
+        roles=["owner", "admin"],
+        permissions=["*"],
+        membership={"status": "active", "role": "owner"},
+        groups=["administrators"],
+    )
 
     claims = _verify(verifier, token)
 
+    assert set(VerifiedAccessTokenClaims.model_fields) == {
+        "issuer",
+        "subject",
+        "audiences",
+        "issued_at",
+        "expires_at",
+        "not_before",
+        "key_id",
+        "email",
+        "email_verified",
+        "token_type",
+    }
     assert not hasattr(claims, "roles")
     assert not hasattr(claims, "permissions")
+    assert not hasattr(claims, "organization_id")
+    assert not hasattr(claims, "org_id")
+    assert not hasattr(claims, "organizations")
+    assert not hasattr(claims, "membership")
+    assert not hasattr(claims, "groups")
 
 
 def test_configured_clock_skew_is_applied_to_token_time_claims() -> None:

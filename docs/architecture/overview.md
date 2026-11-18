@@ -25,7 +25,11 @@ apps/api (FastAPI, Pydantic Settings)
 PostgreSQL (optional local development dependency)
 ```
 
-The API currently exposes only liveness and readiness checks. The database URL remains optional at startup: readiness reports `not_configured` when absent and checks connectivity when present. An additive initial migration now defines the identity and organization schema; there are still no product-facing identity or tenant endpoints.
+The API exposes liveness and readiness checks plus authenticated, scope-authorized scan-record
+persistence operations. The database URL remains optional at startup: readiness reports
+`not_configured` when absent and checks connectivity when present. An additive initial migration
+defines the identity and organization schema; there are no product-facing identity or tenant
+management endpoints.
 
 ## Identity and tenant boundaries
 
@@ -53,16 +57,16 @@ The API currently exposes only liveness and readiness checks. The database URL r
   with configured asymmetric algorithms; issuer, audience, required time claims, subject, and
   optional email metadata are validated before returning `VerifiedAccessTokenClaims`.
   `get_current_principal` is a reusable FastAPI dependency that uses the provider to verify a
-  bearer credential and resolves the claims to an active local identity. The reusable tenant
-  dependency returns an `ActiveOrganizationContext` only after checking active local membership.
-  No application product route currently mounts either dependency; the API router currently
-  mounts health routes only. Authentication configuration is optional for this health-only API.
+  bearer credential and resolves the claims to an active local identity. Protected scan routes use
+  it. The reusable tenant dependency returns an `ActiveOrganizationContext` only after checking
+  active local membership, but is not used as scan-service authorization input. Authentication
+  configuration remains optional at startup; protected routes fail closed when it is unavailable.
   OIDC discovery and login flows are not implemented.
 - `TrustedJwksKeyStore` rejects non-public DNS answers, pins HTTPS connections to validated IP
   addresses while retaining TLS hostname verification, does not follow redirects, uses three
   second connection/read timeouts, limits JWKS responses to 64 KiB, and caps cached keys using
   configuration. Refreshes are throttled, including requests for unknown key IDs.
-- `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial roles; the approved scan action matrix is enforced by the service, while product routes remain unmounted and general fine-grained permissions beyond that policy are unimplemented.
+- `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial roles; the approved scan action matrix is enforced by the service and exposed through protected persistence routes. General fine-grained permissions beyond that policy are unimplemented.
 - `OrganizationService` requires a `VerifiedUserContext`, resolves it to a local user by exact issuer and subject, then locks User → Organization → Membership `FOR SHARE` before checking active states. Membership lookup includes inactive rows and checks status after locking. A caller-supplied organization UUID alone is not an authorization check. Provider organization roles or claims are not consumed as application permissions.
 - Organization listing locks User first, then all related Organization rows and Membership rows in sorted UUID order. It loads inactive memberships as well as active ones before locking; the User lock coordinates with protocol-compliant membership writers and prevents phantom memberships during result materialization.
 - Organization creation locks the identity's User `FOR SHARE`, checks active status after acquiring the lock, and retains it through insertion of the Organization and initial OWNER Membership in the caller's single transaction. It does not mutate or upgrade-lock the User; this reader lock blocks protocol-compliant User status writers using `FOR NO KEY UPDATE`. The service/repository do not open a UOW; any future application boundary must own exactly one. No production organization-creation route or caller exists.
@@ -70,15 +74,20 @@ The API currently exposes only liveness and readiness checks. The database URL r
 - `get_session()` is a request-scoped session resource, not a commit boundary. Mutating application operations must run inside `unit_of_work()`, which owns commit on success, rollback on exceptions, and session closure.
 - `require_active_owner()` validates a projected membership state before a future role/removal operation. Membership changes, owner transfer/removal rules, invitation state-transition services, and automatic enforcement that an organization retain an active owner are not implemented; call the invariant from such operations before exposing management endpoints.
 
-These are application and persistence foundations, not a complete authentication or authorization system. No application product route currently consumes the authentication or tenant dependencies. A verified external token produces verified claims; local identity resolution produces an authenticated principal; the tenant dependency produces a scoped active-organization context after checking local membership. Future product routes must explicitly consume the appropriate dependency.
+These are application and persistence foundations, not a complete authentication or authorization
+system. The scan API consumes the authentication dependency; each organization-scan service
+operation independently authorizes its requested scope and accesses scans in one UOW. The tenant
+dependency remains available for other future routes, but its context is not a grant for later
+service work. A verified external token produces verified claims; local identity resolution
+produces an authenticated principal; local membership and role authorize organization scan actions.
 
 `packages/shared-contracts` is an intentionally empty starting point for future shared API contracts. It must not become a copy of backend business logic.
 
 ## Service authorization for the first product resource
 
-The first resource is a Website/Domain Security Scan. Its model, scoped repository, and
-authorization-aware service are implemented; production routes and a scanning engine are not. A
-scan belongs to one logical scope: either a personal workspace or an organization workspace.
+The first resource is a Website/Domain Security Scan. Its model, scoped repository,
+authorization-aware service, and protected persistence routes are implemented; a scanning engine
+is not. A scan belongs to one logical scope: either a personal workspace or an organization workspace.
 Personal operations lock the authenticated User `FOR SHARE`, revalidate the external identity
 link, check active status, then access only that user's scans inside the same UOW. Personal scans
 do not require organization membership. Organization scan operations lock User → Organization →
@@ -86,7 +95,7 @@ Membership `FOR SHARE`, check statuses after locks, and use the locally stored m
 policy in the same UOW as scan access.
 The approved matrix allows `OWNER`, `ADMIN`, and `MEMBER` to create
 organization scans, while `VIEWER` cannot; all four roles may read and list organization scans.
-No other actions are approved. See the [authorization decision](./decisions.md#initial-website-domain-security-scan-authorization-service-implemented-routes-unmounted)
+No other actions are approved. See the [authorization decision](./decisions.md#initial-website-domain-security-scan-authorization-service-and-protected-routes-implemented)
 for the complete matrix and denial/transaction rules.
 
 The server determines ownership and scope. Data access constrains resource ID and authorized scope
@@ -97,9 +106,10 @@ outcomes to the generic HTTP error envelope without exposing authorization detai
 performs authorization and scan access in one unit of work with PostgreSQL row locks. Tenant
 dependency checks have separate, short UOWs; their resulting context is not authorization for later
 handler resource access.
-Protected product routes must continue to remain unmounted until implementation, PostgreSQL
-validation in local and CI environments, review, and deployment-specific conditions are satisfied.
-Scan routes remain unmounted until Phase 2C.4.7.
+The six scan persistence endpoints are mounted under `/api/v1`: `POST`/`GET` `/scans`,
+`GET` `/scans/{scan_id}`, `POST`/`GET` `/organizations/{organization_id}/scans`, and
+`GET /organizations/{organization_id}/scans/{scan_id}`. Scan execution and analysis remain
+unimplemented.
 See the
 [authorization transaction and concurrency protocol](./decisions.md#authorization-transaction-and-concurrency-protocol-implemented-postgresql-integration-tests).
 
@@ -127,4 +137,9 @@ so no migration was added.
 
 ## Planned, not implemented
 
-Authentication and tenant dependencies are reusable foundations, but protected product routes, OIDC discovery and browser flows, invitation delivery and acceptance, general fine-grained permissions beyond the documented scan authorization policy, detection, risk assessment, AI inference, investigations, intelligence feeds, billing, developer integrations, security audit storage, and production deployment are future capabilities. The identity and tenancy records and service boundaries described above are implemented foundations, not completed product capabilities.
+Protected scan persistence routes are implemented, but scan execution and analysis, OIDC
+discovery and browser flows, invitation delivery and acceptance, general fine-grained permissions
+beyond the documented scan authorization policy, detection, risk assessment, AI inference,
+investigations, intelligence feeds, billing, developer integrations, security audit storage, and
+production deployment are future capabilities. Identity and tenancy management records and service
+boundaries remain foundations, not completed account or organization lifecycle capabilities.

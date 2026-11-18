@@ -30,7 +30,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="ThreatSentinel API",
-    description="ThreatSentinel service foundation. Product capabilities are not yet implemented.",
+    description=(
+        "ThreatSentinel API foundation with authenticated scan-record persistence. "
+        "Scan execution and analysis are not implemented."
+    ),
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -41,7 +44,7 @@ if settings.cors_origins:
         allow_origins=settings.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "X-Request-ID"],
+        allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
     )
 
