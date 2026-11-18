@@ -5,6 +5,7 @@ from threat_sentinel_api.modules.tenants.models import (
     OrganizationInvitation,
     OrganizationMembership,
 )
+from threat_sentinel_api.modules.scans.models import SecurityScan
 
 metadata = Base.metadata
 
@@ -13,6 +14,7 @@ __all__ = [
     "Organization",
     "OrganizationInvitation",
     "OrganizationMembership",
+    "SecurityScan",
     "User",
     "metadata",
 ]
