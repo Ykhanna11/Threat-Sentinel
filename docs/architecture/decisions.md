@@ -28,7 +28,7 @@ These decisions are the approved foundation for the initial project scaffold. Th
 - `DATABASE_URL` is optional for health-only startup; database-backed operations require explicit readiness, failure, and migration behavior.
 - Authentication configuration is optional for the current health-only API. Readiness reports whether the local authentication settings are configured; it does not check JWKS or provider availability.
 - Future shared TypeScript contracts should describe API boundaries, not reimplement backend rules.
-- External identity resolution uses the exact `(issuer, subject)` pair. A previously unknown verified identity may create a local user and external identity mapping, but this provisioning creates no organization membership. Organization creation explicitly grants the creator the initial owner membership.
+- External identity resolution uses the exact `(issuer, subject)` pair. A previously unknown verified identity may create a local user and external identity mapping, but this provisioning creates no organization or membership. Organization creation explicitly grants the creator the initial owner membership.
 - Authentication verification, local identity resolution, and tenant authorization are separate reusable dependencies/contracts. No application product route currently mounts them.
 - `VerifiedUserContext` remains the Phase 2A issuer/subject and email-metadata contract used by
   existing identity and tenancy services; it is not a bearer credential or proof of token

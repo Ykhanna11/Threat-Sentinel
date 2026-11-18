@@ -92,6 +92,49 @@ def test_email_is_not_used_for_identity_linking_and_verification_is_explicit(
     assert session.scalar(select(func.count()).select_from(OrganizationMembership)) == 0
 
 
+def test_same_subject_from_different_issuers_resolves_to_distinct_users(
+    session: Session,
+) -> None:
+    service = IdentityService(IdentityRepository(session))
+    shared_email = "same@example.test"
+
+    first_user = service.resolve_verified_user(
+        VerifiedUserContext(
+            issuer="https://first-issuer.example",
+            subject="shared-subject",
+            email=shared_email,
+        )
+    )
+    second_user = service.resolve_verified_user(
+        VerifiedUserContext(
+            issuer="https://second-issuer.example",
+            subject="shared-subject",
+            email=shared_email,
+        )
+    )
+    session.flush()
+
+    first_identity = session.scalar(
+        select(ExternalIdentity).where(
+            ExternalIdentity.issuer == "https://first-issuer.example",
+            ExternalIdentity.subject == "shared-subject",
+        )
+    )
+    second_identity = session.scalar(
+        select(ExternalIdentity).where(
+            ExternalIdentity.issuer == "https://second-issuer.example",
+            ExternalIdentity.subject == "shared-subject",
+        )
+    )
+
+    assert first_user.id != second_user.id
+    assert first_identity is not None
+    assert second_identity is not None
+    assert first_identity.id != second_identity.id
+    assert first_identity.user_id == first_user.id
+    assert second_identity.user_id == second_user.id
+
+
 def test_issuer_subject_pair_is_unique(
     session: Session,
     make_user: Callable[..., User],

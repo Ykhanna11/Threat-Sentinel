@@ -32,7 +32,7 @@ from threat_sentinel_api.modules.identity.schemas import (
     VerifiedAccessTokenClaims,
 )
 from threat_sentinel_api.modules.identity.service import IdentityService
-from threat_sentinel_api.modules.tenants.models import OrganizationMembership
+from threat_sentinel_api.modules.tenants.models import Organization, OrganizationMembership
 
 
 def _claims(**overrides: object) -> VerifiedAccessTokenClaims:
@@ -336,6 +336,11 @@ def test_successful_resolution_persists_identity_without_membership(
     claims = _claims()
     _override_provider(client, StubProvider(claims))
     _bind_test_unit_of_work(monkeypatch, engine)
+    with Session(engine) as verify_session:
+        organizations_before = verify_session.scalar(select(func.count()).select_from(Organization))
+        memberships_before = verify_session.scalar(
+            select(func.count()).select_from(OrganizationMembership)
+        )
 
     response = client.get("/protected", headers={"Authorization": "Bearer valid-token"})
 
@@ -352,7 +357,58 @@ def test_successful_resolution_persists_identity_without_membership(
         )
         assert identity is not None
         assert identity.user_id == principal_id
-        assert verify_session.scalar(select(func.count()).select_from(OrganizationMembership)) == 0
+        assert (
+            verify_session.scalar(select(func.count()).select_from(Organization))
+            == organizations_before
+        )
+        assert (
+            verify_session.scalar(select(func.count()).select_from(OrganizationMembership))
+            == memberships_before
+        )
+
+
+def test_failed_provider_verification_does_not_resolve_or_provision_identity(
+    client: TestClient,
+    engine: Engine,
+) -> None:
+    _override_provider(
+        client,
+        StubProvider(error=InvalidAccessToken("private verification details")),
+    )
+    identity_service_factory = Mock()
+    client.app.dependency_overrides[auth_dependencies.get_identity_service_factory] = lambda: (
+        identity_service_factory
+    )
+    with Session(engine) as verify_session:
+        users_before = verify_session.scalar(select(func.count()).select_from(User))
+        identities_before = verify_session.scalar(
+            select(func.count()).select_from(ExternalIdentity)
+        )
+        organizations_before = verify_session.scalar(select(func.count()).select_from(Organization))
+        memberships_before = verify_session.scalar(
+            select(func.count()).select_from(OrganizationMembership)
+        )
+
+    response = client.get("/protected", headers={"Authorization": "Bearer invalid-token"})
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert "private verification details" not in response.text
+    identity_service_factory.assert_not_called()
+    with Session(engine) as verify_session:
+        assert verify_session.scalar(select(func.count()).select_from(User)) == users_before
+        assert (
+            verify_session.scalar(select(func.count()).select_from(ExternalIdentity))
+            == identities_before
+        )
+        assert (
+            verify_session.scalar(select(func.count()).select_from(Organization))
+            == organizations_before
+        )
+        assert (
+            verify_session.scalar(select(func.count()).select_from(OrganizationMembership))
+            == memberships_before
+        )
 
 
 def test_suspended_local_user_receives_generic_unauthorized_response(
