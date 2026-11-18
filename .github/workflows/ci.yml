@@ -42,6 +42,8 @@ jobs:
     services:
       postgres-test:
         image: postgres:17-alpine
+        ports:
+          - 5432:5432
         env:
           POSTGRES_DB: threatsentinel_test
           POSTGRES_USER: threatsentinel_test
@@ -66,5 +68,5 @@ jobs:
       - run: uv run --directory apps/api --project . pytest -m "not postgres_integration"
       - name: PostgreSQL integration tests
         env:
-          THREAT_SENTINEL_TEST_DATABASE_URL: postgresql+psycopg://threatsentinel_test:integration-test-only@postgres-test:5432/threatsentinel_test
+          THREAT_SENTINEL_TEST_DATABASE_URL: postgresql+psycopg://threatsentinel_test:integration-test-only@localhost:5432/threatsentinel_test
         run: uv run --directory apps/api --project . pytest -m postgres_integration
