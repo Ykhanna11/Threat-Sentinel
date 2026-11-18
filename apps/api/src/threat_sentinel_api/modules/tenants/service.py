@@ -23,7 +23,11 @@ class OrganizationService:
         principal: VerifiedUserContext,
         details: OrganizationCreate,
     ) -> Organization:
-        owner = self._repository.find_active_user(principal.issuer, principal.subject)
+        """Create the organization and initial owner membership in the caller's UOW."""
+        owner = self._repository.lock_active_user_for_organization_creation(
+            principal.issuer,
+            principal.subject,
+        )
         if owner is None:
             raise ActiveUserRequired("An active local user is required.")
         return self._repository.create_with_owner(details, owner)

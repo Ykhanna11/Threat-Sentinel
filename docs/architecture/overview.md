@@ -42,7 +42,9 @@ The API currently exposes only liveness and readiness checks. The database URL r
   used by identity and tenancy services; it is neither an untrusted request schema nor proof of
   token verification. `IdentityService.resolve_authenticated_principal()` resolves verified
   claims to an active local user and returns an immutable `AuthenticatedPrincipal` containing
-  local and external identity IDs. That principal is not an authorization grant.
+  local and external identity IDs. Existing-user resolution locks the User `FOR SHARE` and
+  revalidates the exact issuer/subject mapping before active-status validation and principal
+  issuance. That principal is not an authorization grant.
 - When a successfully verified issuer/subject pair is not known locally, identity resolution may
   create a local user and external identity mapping. This does not create an organization or
   membership; access still requires a separately established active local membership.
@@ -60,8 +62,10 @@ The API currently exposes only liveness and readiness checks. The database URL r
   addresses while retaining TLS hostname verification, does not follow redirects, uses three
   second connection/read timeouts, limits JWKS responses to 64 KiB, and caps cached keys using
   configuration. Refreshes are throttled, including requests for unknown key IDs.
-- `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial coarse roles; scan-specific and fine-grained/custom permission enforcement remains future work.
-- `OrganizationService` requires a `VerifiedUserContext`, resolves it to a local user by issuer and subject, then checks the active organization and membership in the database. A caller-supplied organization UUID alone is not an authorization check. Provider organization roles or claims are not consumed as application permissions.
+- `Organization`, `OrganizationMembership`, and `OrganizationInvitation` are persisted separately from identity. A user may have memberships in multiple organizations. Organization creation explicitly gives the creating active user an owner membership; resolving an identity alone creates no membership. Owner/admin/member/viewer are the initial roles; the approved scan action matrix is enforced by the service, while product routes remain unmounted and general fine-grained permissions beyond that policy are unimplemented.
+- `OrganizationService` requires a `VerifiedUserContext`, resolves it to a local user by exact issuer and subject, then locks User → Organization → Membership `FOR SHARE` before checking active states. Membership lookup includes inactive rows and checks status after locking. A caller-supplied organization UUID alone is not an authorization check. Provider organization roles or claims are not consumed as application permissions.
+- Organization listing locks User first, then all related Organization rows and Membership rows in sorted UUID order. It loads inactive memberships as well as active ones before locking; the User lock coordinates with protocol-compliant membership writers and prevents phantom memberships during result materialization.
+- Organization creation locks the identity's User `FOR SHARE`, checks active status after acquiring the lock, and retains it through insertion of the Organization and initial OWNER Membership in the caller's single transaction. It does not mutate or upgrade-lock the User; this reader lock blocks protocol-compliant User status writers using `FOR NO KEY UPDATE`. The service/repository do not open a UOW; any future application boundary must own exactly one. No production organization-creation route or caller exists.
 - Pending invitations have a database-enforced unique key per organization and normalized email (lowercase and trimmed); terminal invitations do not block reissue. Invitation delivery and state-transition endpoints are not implemented.
 - `get_session()` is a request-scoped session resource, not a commit boundary. Mutating application operations must run inside `unit_of_work()`, which owns commit on success, rollback on exceptions, and session closure.
 - `require_active_owner()` validates a projected membership state before a future role/removal operation. Membership changes, owner transfer/removal rules, invitation state-transition services, and automatic enforcement that an organization retain an active owner are not implemented; call the invariant from such operations before exposing management endpoints.
@@ -70,26 +74,43 @@ These are application and persistence foundations, not a complete authentication
 
 `packages/shared-contracts` is an intentionally empty starting point for future shared API contracts. It must not become a copy of backend business logic.
 
-## Planned authorization for the first product resource
+## Service authorization for the first product resource
 
 The first resource is a Website/Domain Security Scan. Its model, scoped repository, and
 authorization-aware service are implemented; production routes and a scanning engine are not. A
 scan belongs to one logical scope: either a personal workspace or an organization workspace.
-Personal scans are owned by the authenticated principal assigned by the server; authenticated
-users may create personal scans and list/read only their own. Personal scans do not require
-organization membership. Organization scans require an active local user, active organization,
-and active local membership and use the local membership role policy.
+Personal operations lock the authenticated User `FOR SHARE`, revalidate the external identity
+link, check active status, then access only that user's scans inside the same UOW. Personal scans
+do not require organization membership. Organization scan operations lock User → Organization →
+Membership `FOR SHARE`, check statuses after locks, and use the locally stored membership role
+policy in the same UOW as scan access.
 The approved matrix allows `OWNER`, `ADMIN`, and `MEMBER` to create
 organization scans, while `VIEWER` cannot; all four roles may read and list organization scans.
-No other actions are approved. See the [authorization decision](./decisions.md#initial-website-domain-security-scan-authorization-planned)
+No other actions are approved. See the [authorization decision](./decisions.md#initial-website-domain-security-scan-authorization-service-implemented-routes-unmounted)
 for the complete matrix and denial/transaction rules.
 
 The server determines ownership and scope. Data access constrains resource ID and authorized scope
 together; a missing resource and an out-of-scope resource return the same generic `404`. Permission
 denial for an in-scope resource returns a generic `403`. The service performs authorization and
-scan access in one unit of work, but the approved row-lock protocol needed to serialize concurrent
-authorization-state changes is not implemented or PostgreSQL-validated. See the
-[approved transaction and concurrency protocol](./decisions.md#approved-transaction-and-concurrency-protocol-implementation-pending).
+scan access in one unit of work with PostgreSQL row locks. Tenant dependency checks have separate,
+short UOWs; their resulting context is not authorization for later handler resource access.
+Protected product routes must continue to remain unmounted until implementation, PostgreSQL
+validation in local and CI environments, review, and deployment-specific conditions are satisfied.
+See the
+[authorization transaction and concurrency protocol](./decisions.md#authorization-transaction-and-concurrency-protocol-implemented-postgresql-integration-tests).
+
+## Concurrency validation status
+
+The PostgreSQL 17 integration tests exercise independent sessions and connections, deterministic
+events, bounded waits, and PostgreSQL blocking diagnostics. They cover User/Organization/Membership
+lock ordering and blocking, absent-membership serialization, writer-first state observations,
+organization-list consistency, principal resolution after a stale cached User read, concurrent
+same-user organization creation, organization creation versus user status changes, and rollback/lock
+release. The SQLite suite validates existing application behavior but is not evidence of PostgreSQL
+row-lock behavior. This describes validation coverage, not a CI result or production-readiness
+claim. The PostgreSQL marker is configured in CI, but its result must be checked independently.
+Local validation does not imply production deployment or readiness. No schema change was needed,
+so no migration was added.
 
 ## Design direction
 
@@ -102,4 +123,4 @@ authorization-state changes is not implemented or PostgreSQL-validated. See the
 
 ## Planned, not implemented
 
-Authentication and tenant dependencies are reusable foundations, but protected product routes, OIDC discovery and browser flows, invitation delivery and acceptance, fine-grained permissions, detection, risk assessment, AI inference, investigations, intelligence feeds, billing, developer integrations, security audit storage, and production deployment are future capabilities. The identity and tenancy records and service boundaries described above are implemented foundations, not completed product capabilities.
+Authentication and tenant dependencies are reusable foundations, but protected product routes, OIDC discovery and browser flows, invitation delivery and acceptance, general fine-grained permissions beyond the documented scan authorization policy, detection, risk assessment, AI inference, investigations, intelligence feeds, billing, developer integrations, security audit storage, and production deployment are future capabilities. The identity and tenancy records and service boundaries described above are implemented foundations, not completed product capabilities.

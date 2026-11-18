@@ -51,15 +51,15 @@ This document defines engineering principles for future implementation. The curr
   bearer credentials receive a generic `401` with a `WWW-Authenticate: Bearer` challenge.
   Operational failures fail closed and are never reported as successful authentication.
 - **Authorize server-side:** the tenancy service requires an active local user and active database membership for the requested organization; an organization ID alone grants no access. Future protected routes must invoke this boundary and test cross-tenant denial.
-- **Scope the planned first product resource:** Website/Domain Security Scans will each belong to
+- **Scope the first product resource:** Website/Domain Security Scans each belong to
   exactly one personal or organization scope. Authenticated users may create personal scans, whose
   ownership comes from the authenticated principal, never a client-supplied owner ID; personal scans
   require no organization membership and are readable/listable only by their owner. Organization
   scans require an active local user, active organization, and active local membership. The approved
   role matrix allows `OWNER`, `ADMIN`, and `MEMBER` to create organization scans;
   `VIEWER` is denied creation; all four may read and list organization scans. No other actions are
-  approved; see the [architecture decision](../architecture/decisions.md#initial-website-domain-security-scan-authorization-planned).
-  This policy is documented for future implementation and is not enforced by current product routes.
+  approved; see the [architecture decision](../architecture/decisions.md#initial-website-domain-security-scan-authorization-service-implemented-routes-unmounted).
+  The service enforces this policy, but no current product route is mounted.
 - **Constrain resource lookups:** combine the resource ID and authorized personal-owner or
   organization scope in the database query; do not globally load by UUID and rely only on a later
   application-layer check. Return the same generic `404` for missing and out-of-scope resources;
@@ -76,12 +76,70 @@ This document defines engineering principles for future implementation. The curr
 - **Use defense in depth:** require dependency updates, code review, automated checks, secure transport, least privilege, backups, and incident-response procedures before production use.
 - **Test security boundaries:** add threat modeling, input abuse cases, authorization and tenant-isolation tests, and secret/log redaction checks alongside the relevant features.
 
-Initially, do not introduce role hierarchies, implicit permission inheritance, or authorization
-caching. A shared transaction alone does not prevent membership-revocation races. The approved
-row-lock protocol is documented in the
-[architecture decision](../architecture/decisions.md#approved-transaction-and-concurrency-protocol-implementation-pending);
-it remains unimplemented and requires PostgreSQL validation before organization scan operations
-are exposed through production routes.
+## Authorization concurrency protocol and validation boundary
+
+The current implementation uses PostgreSQL's default transaction isolation and row locks. Reader
+queries use `.with_for_update(read=True, of=Model)` (`FOR SHARE`); authorization-state writers
+use `.with_for_update(key_share=True, of=Model)` alone (`FOR NO KEY UPDATE`). Lock order is User
+rows sorted by UUID → Organization → Invitation rows sorted by UUID → Membership rows sorted by
+UUID. Each lock uses a separate single-table query. There are no automatic retries, added lock
+timeouts, isolation changes, or authorization caches. Deadlocks and other transient database
+errors roll back the whole UOW and must not be converted into authorization denials or not-found
+responses.
+
+Implemented readers are:
+
+- Personal scan create/list/read: lock the authenticated User, re-resolve the exact issuer/subject
+  external identity mapping, confirm identity and user IDs still match the principal, then validate
+  active status and access owner-scoped scans in the same UOW.
+- Organization scan create/list/read and tenant membership checks: lock User → Organization →
+  Membership, including inactive membership rows, before validating status and evaluating the
+  existing local role/action matrix. Scope-constrained scan queries and generic 404/403 behavior
+  remain intact.
+- Existing-user principal resolution: lock and refresh User `FOR SHARE`, revalidate the exact
+  external identity mapping, then validate active status before issuing a principal. There is no
+  separate ExternalIdentity lock and no current production unlink/relink/reassignment operation.
+- Organization listing: lock User first, enumerate all associated Membership rows without
+  prefiltering by status, lock all relevant Organizations in UUID order, then lock Membership rows
+  in UUID order. Retain the locks through authorization checks and list materialization. A
+  protocol-compliant membership writer must lock User `FOR NO KEY UPDATE` first, preventing
+  membership phantoms.
+
+Organization creation locks User `FOR SHARE` and validates active status after acquiring the lock.
+It retains that lock while inserting the Organization and initial OWNER Membership in the caller's
+single transaction. It does not mutate User state or upgrade the User lock; `FOR SHARE` blocks a
+protocol-compliant User status writer using `FOR NO KEY UPDATE`. The service and repository do not
+create a nested UOW. There is no production organization-creation route or caller; any future
+application boundary must own exactly one UOW spanning validation and writes. New User and
+ExternalIdentity provisioning remains atomic in the existing principal-resolution UOW.
+
+Tenant dependencies hold locks only in their own short UOW. A returned organization context
+cannot substitute for authorization in the later transaction that accesses a protected resource.
+Every protected service operation must make its authorization decision and access the protected
+resource in the same UOW.
+
+Future writers for user, organization, membership, invitation, or identity-link lifecycle changes
+are not implemented. Before validation or mutation, every writer that changes existing
+authorization-state rows must acquire `FOR NO KEY UPDATE`, follow User → Organization → Invitation
+→ Membership, and sort same-type rows by UUID. In particular, future User status writers must
+acquire User `FOR NO KEY UPDATE`. Membership creation/restoration locks the Organization before
+inserting/restoring a Membership. Future identity reassignment locks all affected User rows in UUID
+order; readers revalidate their identity mapping after the User lock. Any lifecycle writer must
+meet this contract before its capability is exposed. Do not hold locks across network calls, AI
+inference, or lengthy scan execution.
+
+PostgreSQL 17 integration tests use independent sessions/connections, deterministic events,
+bounded waits, and `pg_blocking_pids()` diagnostics. They cover lock blocking and ordering,
+missing-membership serialization, writer-first changes, listing consistency, principal freshness,
+organization creation/status races, and rollback/lock release. SQLite tests remain useful for
+application behavior but are not evidence of PostgreSQL locking behavior. Local PostgreSQL test
+success does not establish CI success, production deployment, or production readiness. CI runs
+the PostgreSQL marker separately; its result must be checked independently. This lock protocol
+requires no migration.
+
+Protected product routes must remain unmounted until the relevant implementation and PostgreSQL
+validation have been reviewed and the required CI checks and deployment-specific conditions are
+met. See the [architecture decision](../architecture/decisions.md#authorization-transaction-and-concurrency-protocol-implemented-postgresql-integration-tests).
 
 The repository now has a standalone JWT access-token verifier, a reusable FastAPI authentication
 dependency, and a reusable tenant membership dependency. The tenant dependency uses the existing
@@ -95,9 +153,11 @@ or membership. Inactive local users are rejected, and organization access still 
 independently established active local membership. Provider roles and organization claims do not
 grant local authorization. The claims and principal types do not perform or prove cryptographic
 verification by themselves. OIDC discovery, browser login/logout, refresh sessions, session
-revocation, invitation delivery, membership mutation/owner transfer, RBAC/permission enforcement
-(including the documented scan policy), audit event storage, rate limiting, and production secrets
-integration remain unimplemented. These foundations are not a production security control set.
+revocation, invitation delivery, membership mutation/owner transfer, a general RBAC framework
+beyond the implemented service-level scan authorization policy, audit event storage, rate limiting,
+and production secrets integration remain unimplemented. Service-level authorization is
+implemented for the documented scan actions, but product HTTP routes remain unmounted. These
+foundations are not a production security control set.
 
 The verifier uses the configured JWKS URL directly; it does not perform OIDC discovery. The
 three-second connection/read timeouts, 64 KiB response limit, 30-second unknown-key refresh

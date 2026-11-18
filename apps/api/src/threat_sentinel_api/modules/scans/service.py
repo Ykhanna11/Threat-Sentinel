@@ -25,11 +25,7 @@ class ScanNotFound(LookupError):
 
 
 class ScanService:
-    """Keep checks and scan access in one UOW, without serializing concurrent status changes.
-
-    Membership changes and local-user deactivation can still race. Do not expose organization
-    operations through production routes before the locking phase.
-    """
+    """Keep authorization locks and scan access in one unit of work."""
 
     def __init__(self, session_factory: SessionFactory | None = None) -> None:
         self._session_factory = session_factory
@@ -114,15 +110,17 @@ class ScanService:
 
     @staticmethod
     def _require_active_user(session: Session, principal: AuthenticatedPrincipal) -> None:
-        identity = IdentityRepository(session).find_by_issuer_subject(
+        locked_identity = IdentityRepository(session).lock_user_for_identity_share(
             principal.issuer,
             principal.subject,
         )
+        if locked_identity is None:
+            raise InactiveUserError("The linked account is not active.")
+        identity_id, user = locked_identity
         if (
-            identity is None
-            or identity.id != principal.external_identity_id
-            or identity.user_id != principal.user_id
-            or identity.user.status is not UserStatus.ACTIVE
+            identity_id != principal.external_identity_id
+            or user.id != principal.user_id
+            or user.status is not UserStatus.ACTIVE
         ):
             raise InactiveUserError("The linked account is not active.")
 
