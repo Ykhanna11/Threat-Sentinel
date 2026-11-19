@@ -13,8 +13,11 @@ from threat_sentinel_api import main as api_main
 from threat_sentinel_api.api import dependencies as auth_dependencies
 from threat_sentinel_api.api.v1.routes import account as account_routes
 from threat_sentinel_api.db import session as database_session
-from threat_sentinel_api.modules.identity.models import User
+from threat_sentinel_api.modules.identity.enums import UserStatus
+from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
 from threat_sentinel_api.modules.identity.schemas import VerifiedAccessTokenClaims
+from threat_sentinel_api.modules.tenants.enums import MembershipStatus, OrganizationRole
+from threat_sentinel_api.modules.tenants.models import Organization, OrganizationMembership
 
 ISSUER = "https://account-api.example"
 
@@ -158,3 +161,217 @@ def test_profile_update_rejects_invalid_input(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "request_validation_error"
+
+
+def test_deactivation_requires_explicit_confirmation_and_preserves_account_history(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _configure(client, engine, monkeypatch, "deactivation-account")
+    assert client.get("/api/v1/account/profile").status_code == 200
+
+    for payload in (
+        {"confirmation": "deactivate"},
+        {"confirmation": "DEACTIVATE", "user_id": "00000000-0000-0000-0000-000000000001"},
+        {"confirmation": "DEACTIVATE", "status": "active"},
+    ):
+        invalid = client.post("/api/v1/account/deactivate", json=payload)
+        assert invalid.status_code == 422
+    with factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None and user.status is UserStatus.ACTIVE
+
+    response = client.post("/api/v1/account/deactivate", json={"confirmation": "DEACTIVATE"})
+
+    assert response.status_code == 204
+    assert response.content == b""
+    profile = client.get("/api/v1/account/profile")
+    repeated = client.post(
+        "/api/v1/account/deactivate",
+        json={"confirmation": "DEACTIVATE"},
+    )
+    assert profile.status_code == repeated.status_code == 401
+    assert profile.headers["www-authenticate"] == "Bearer"
+    assert (
+        profile.json()
+        == repeated.json()
+        == {
+            "error": {
+                "code": "http_error",
+                "message": "The request could not be completed.",
+            }
+        }
+    )
+
+    with factory() as session:
+        user = session.scalar(select(User))
+        identity = session.scalar(select(ExternalIdentity))
+        assert user is not None and user.status is UserStatus.DEACTIVATED
+        assert identity is not None and identity.user_id == user.id
+
+    openapi = client.get("/openapi.json").json()
+    operation = openapi["paths"]["/api/v1/account/deactivate"]["post"]
+    request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
+    assert request_schema["$ref"].endswith("/AccountDeactivationRequest")
+    assert "204" in operation["responses"]
+
+
+def test_deactivation_preserves_active_member_membership(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _configure(client, engine, monkeypatch, "member-account")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    with factory() as session, session.begin():
+        user = session.scalar(select(User))
+        assert user is not None
+        organization = Organization(
+            name="Member organization",
+            slug="member-organization",
+            created_by_user_id=user.id,
+        )
+        session.add(organization)
+        session.flush()
+        membership = OrganizationMembership(
+            organization_id=organization.id,
+            user_id=user.id,
+            role=OrganizationRole.MEMBER,
+            status=MembershipStatus.ACTIVE,
+        )
+        session.add(membership)
+        session.flush()
+        membership_id = membership.id
+
+    response = client.post(
+        "/api/v1/account/deactivate",
+        json={"confirmation": "DEACTIVATE"},
+    )
+
+    assert response.status_code == 204
+    with factory() as session:
+        user = session.scalar(select(User))
+        membership = session.get(OrganizationMembership, membership_id)
+        assert user is not None and user.status is UserStatus.DEACTIVATED
+        assert membership is not None
+        assert membership.role is OrganizationRole.MEMBER
+        assert membership.status is MembershipStatus.ACTIVE
+
+
+def test_deactivation_rejects_last_active_owner_with_generic_conflict(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _configure(client, engine, monkeypatch, "sole-owner")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    with factory() as session, session.begin():
+        owner = session.scalar(select(User))
+        assert owner is not None
+        organization = Organization(
+            name="Sole owner organization",
+            slug="sole-owner-organization",
+            created_by_user_id=owner.id,
+        )
+        session.add(organization)
+        session.flush()
+        session.add(
+            OrganizationMembership(
+                organization_id=organization.id,
+                user_id=owner.id,
+                role=OrganizationRole.OWNER,
+                status=MembershipStatus.ACTIVE,
+            )
+        )
+
+    response = client.post(
+        "/api/v1/account/deactivate",
+        json={"confirmation": "DEACTIVATE"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": {
+            "code": "http_error",
+            "message": "The request could not be completed.",
+        }
+    }
+    with factory() as session:
+        owner = session.scalar(select(User))
+        assert owner is not None and owner.status is UserStatus.ACTIVE
+
+
+@pytest.mark.parametrize(
+    ("other_owner_status", "expected_status"),
+    [
+        (UserStatus.ACTIVE, 204),
+        (UserStatus.SUSPENDED, 409),
+    ],
+)
+def test_deactivation_requires_another_active_user_owner_and_preserves_membership(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    other_owner_status: UserStatus,
+    expected_status: int,
+) -> None:
+    factory = _configure(client, engine, monkeypatch, "shared-owner")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    with factory() as session, session.begin():
+        owner = session.scalar(select(User))
+        assert owner is not None
+        other_owner = User()
+        other_owner.status = other_owner_status
+        session.add(
+            ExternalIdentity(
+                user=other_owner,
+                issuer=ISSUER,
+                subject="other-active-owner",
+            )
+        )
+        organization = Organization(
+            name="Shared owner organization",
+            slug="shared-owner-organization",
+            created_by_user_id=owner.id,
+        )
+        session.add(organization)
+        session.flush()
+        session.add_all(
+            [
+                OrganizationMembership(
+                    organization_id=organization.id,
+                    user_id=owner.id,
+                    role=OrganizationRole.OWNER,
+                    status=MembershipStatus.ACTIVE,
+                ),
+                OrganizationMembership(
+                    organization_id=organization.id,
+                    user_id=other_owner.id,
+                    role=OrganizationRole.OWNER,
+                    status=MembershipStatus.ACTIVE,
+                ),
+            ]
+        )
+
+    response = client.post(
+        "/api/v1/account/deactivate",
+        json={"confirmation": "DEACTIVATE"},
+    )
+
+    assert response.status_code == expected_status
+    with factory() as session:
+        owner = session.scalar(
+            select(User)
+            .join(ExternalIdentity)
+            .where(
+                ExternalIdentity.subject == "shared-owner",
+            )
+        )
+        memberships = session.scalars(select(OrganizationMembership)).all()
+        expected_owner_status = (
+            UserStatus.DEACTIVATED if expected_status == 204 else UserStatus.ACTIVE
+        )
+        assert owner is not None and owner.status is expected_owner_status
+        assert len(memberships) == 2
+        assert all(membership.status is MembershipStatus.ACTIVE for membership in memberships)

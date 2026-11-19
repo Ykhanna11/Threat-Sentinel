@@ -80,7 +80,9 @@ This document defines engineering principles for future implementation. The curr
 - **Prevent duplicate pending invitations:** PostgreSQL enforces a partial unique index on organization and normalized intended email; application transitions must still recheck status and expiry transactionally.
 - **Retain an active owner:** membership role/status changes validate the projected state under
   the organization lock. The general membership route cannot change owners; an explicit owner-only
-  transfer atomically promotes an active member and demotes the prior owner.
+  transfer atomically promotes an active member and demotes the prior owner. Self-deactivation
+  locks all affected organizations and memberships in canonical order, and is rejected unless
+  another active OWNER backed by an active User remains in each one.
 - **Protect invitation tokens:** invitations are bound to an exact verified external identity;
   only a SHA-256 token hash is stored. Raw invitation tokens are returned once to the authorized
   creator, accepted once before expiry, and never logged. No email delivery is claimed.
@@ -143,14 +145,17 @@ resource in the same UOW.
 
 Implemented account profile and organization/member/invitation lifecycle writers acquire `FOR NO
 KEY UPDATE` before validation or mutation, follow User → Organization → Invitation → Membership,
-and sort same-type rows by UUID. Invitation creation has a short authorization UOW that locks User
+and sort same-type rows by UUID. Self-deactivation locks the caller User, all affected Organization
+rows, and then all affected Membership rows in sorted UUID order; it preserves memberships/roles
+and requires another active OWNER backed by an active User in each affected organization.
+Invitation creation has a short authorization UOW that locks User
 → Organization → Membership, checks the requested role, and only then performs a non-locking
 recipient identity lookup. It releases those locks before the write UOW, which reacquires User rows
 in UUID order and follows User → Organization → Invitation → Membership while revalidating all
 authorization and recipient state. A change between UOWs fails closed; the initial check is not a
 grant. Membership creation/restoration locks the Organization before inserting/restoring a
-Membership. Account suspension/deactivation, organization archival, privileged recovery, and
-identity reassignment are not exposed because there is no legitimate control plane or use case. Any
+Membership. Account suspension/reactivation, organization archival, privileged recovery, and
+identity reassignment are not exposed because no legitimate authority/control plane exists. Any
 future writer must meet this contract before its capability is exposed. Do not hold locks across
 network calls, AI inference, or lengthy scan execution.
 
@@ -170,7 +175,9 @@ the locking protocol before exposure. See the
 
 The repository has a standalone JWT access-token verifier, a reusable FastAPI authentication
 dependency, a reusable tenant membership dependency, authenticated account/organization lifecycle
-routes, and protected scan-persistence routes. The tenant dependency uses the existing
+routes (including explicit self-deactivation), and protected scan-persistence routes. No durable
+audit-event mechanism exists; request logs are not an auditable record of deactivation or recovery.
+The tenant dependency uses the existing
 active-membership check in a short unit-of-work transaction; protected service operations do not
 use that separate result as authorization input.
 Liveness remains independent of database and authentication configuration. Readiness reports
@@ -181,10 +188,12 @@ does not create an organization
 or membership. Inactive local users are rejected and onboarding cannot reactivate one. Provider
 roles and organization claims do not grant local authorization. The claims and principal types do
 not perform or prove cryptographic verification by themselves. OIDC discovery, browser
-login/logout, refresh sessions, account suspension/reactivation, privileged recovery, invitation
-email delivery, a general RBAC framework beyond the implemented service-level policies, audit event
-storage, rate limiting, and production secrets integration remain unimplemented. Lifecycle
-behavior and remaining limitations are listed in the [Phase 2 roadmap](../architecture/phase-2-roadmap.md).
+login/logout, refresh sessions, account suspension/reactivation, privileged and organization
+recovery, invitation email delivery, a general RBAC framework beyond the implemented service-level
+policies, audit event storage, rate limiting, and production secrets integration remain
+unimplemented. Deactivation does not revoke provider sessions or already issued JWTs, though
+subsequent protected API authentication checks local account state. Lifecycle behavior and
+remaining limitations are listed in the [Phase 2 roadmap](../architecture/phase-2-roadmap.md).
 These foundations are not a production security control set.
 
 The verifier uses the configured JWKS URL directly; it does not perform OIDC discovery. The

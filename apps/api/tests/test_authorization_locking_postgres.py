@@ -21,6 +21,7 @@ from threat_sentinel_api.db.authorization_locks import (
 )
 from threat_sentinel_api.db.session import unit_of_work
 from threat_sentinel_api.modules.identity.enums import UserStatus
+from threat_sentinel_api.modules.identity.lifecycle_service import AccountLifecycleService
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
 from threat_sentinel_api.modules.identity.schemas import (
@@ -33,6 +34,7 @@ from threat_sentinel_api.modules.scans.models import SecurityScan
 from threat_sentinel_api.modules.scans.repository import ScanRepository
 from threat_sentinel_api.modules.scans.service import ScanService
 from threat_sentinel_api.modules.tenants.lifecycle_service import OrganizationLifecycleService
+from threat_sentinel_api.modules.tenants.invariants import ActiveOwnerRetentionError
 from threat_sentinel_api.modules.tenants.enums import (
     InvitationStatus,
     MembershipStatus,
@@ -1414,3 +1416,140 @@ def test_concurrent_member_suspensions_retain_the_organization_owner(
             == 1
         )
         assert sum(member.status is MembershipStatus.SUSPENDED for member in memberships) == 2
+
+
+def test_account_deactivation_rejects_the_only_active_owner(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    owner = authorization_data.create_user()
+    organization_id = authorization_data.create_organization(owner)
+
+    with pytest.raises(ActiveOwnerRetentionError):
+        with unit_of_work(postgres_session_factory) as session:
+            AccountLifecycleService(session).deactivate(owner.principal)
+
+    with postgres_session_factory() as session:
+        user = session.get(User, owner.user_id)
+        membership = session.scalar(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationMembership.user_id == owner.user_id,
+            )
+        )
+        assert user is not None and user.status is UserStatus.ACTIVE
+        assert membership is not None and membership.status is MembershipStatus.ACTIVE
+
+
+def test_concurrent_owner_deactivations_retain_one_active_owner(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    first_owner = authorization_data.create_user()
+    second_owner = authorization_data.create_user()
+    organization_id = authorization_data.create_organization(
+        first_owner,
+        membership_user=second_owner,
+        role=OrganizationRole.OWNER,
+    )
+    barrier = Barrier(2)
+    bounded_factory = _session_factory_with_postgres_timeouts(postgres_session_factory)
+
+    def deactivate(identity: IdentityFixture) -> bool:
+        barrier.wait(timeout=5)
+        try:
+            with unit_of_work(bounded_factory) as session:
+                AccountLifecycleService(session).deactivate(identity.principal)
+            return True
+        except ActiveOwnerRetentionError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(deactivate, first_owner),
+            executor.submit(deactivate, second_owner),
+        ]
+        results = [future.result(timeout=15) for future in futures]
+
+    assert sorted(results) == [False, True]
+    with postgres_session_factory() as session:
+        owners = session.execute(
+            select(User.status, OrganizationMembership.status)
+            .join(
+                OrganizationMembership,
+                OrganizationMembership.user_id == User.id,
+            )
+            .where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationMembership.role == OrganizationRole.OWNER,
+            )
+        ).all()
+        assert len(owners) == 2
+        active_owner_count = sum(
+            user_status is UserStatus.ACTIVE and membership_status is MembershipStatus.ACTIVE
+            for user_status, membership_status in owners
+        )
+        deactivated_owner_count = sum(
+            user_status is UserStatus.DEACTIVATED for user_status, _ in owners
+        )
+        assert active_owner_count == deactivated_owner_count == 1
+
+
+def test_account_deactivation_serializes_with_owner_transfer(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    departing_owner = authorization_data.create_user()
+    transferring_owner = authorization_data.create_user()
+    new_owner = authorization_data.create_user()
+    organization_id = authorization_data.create_organization(
+        departing_owner,
+        membership_user=transferring_owner,
+        role=OrganizationRole.OWNER,
+    )
+    with postgres_session_factory() as session, session.begin():
+        target_membership = OrganizationMembership(
+            organization_id=organization_id,
+            user_id=new_owner.user_id,
+            role=OrganizationRole.MEMBER,
+            status=MembershipStatus.ACTIVE,
+        )
+        session.add(target_membership)
+        session.flush()
+        target_membership_id = target_membership.id
+
+    barrier = Barrier(2)
+    bounded_factory = _session_factory_with_postgres_timeouts(postgres_session_factory)
+
+    def deactivate() -> None:
+        barrier.wait(timeout=5)
+        with unit_of_work(bounded_factory) as session:
+            AccountLifecycleService(session).deactivate(departing_owner.principal)
+
+    def transfer() -> None:
+        barrier.wait(timeout=5)
+        with unit_of_work(bounded_factory) as session:
+            OrganizationLifecycleService(session).transfer_ownership(
+                transferring_owner.principal,
+                organization_id,
+                target_membership_id,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(deactivate), executor.submit(transfer)]
+        for future in futures:
+            future.result(timeout=15)
+
+    with postgres_session_factory() as session:
+        account = session.get(User, departing_owner.user_id)
+        memberships = session.execute(
+            select(OrganizationMembership.user_id, OrganizationMembership.role).where(
+                OrganizationMembership.organization_id == organization_id,
+            )
+        ).all()
+        assert account is not None and account.status is UserStatus.DEACTIVATED
+        assert dict(memberships) == {
+            departing_owner.user_id: OrganizationRole.OWNER,
+            transferring_owner.user_id: OrganizationRole.ADMIN,
+            new_owner.user_id: OrganizationRole.OWNER,
+        }

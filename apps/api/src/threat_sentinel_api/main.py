@@ -11,6 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from threat_sentinel_api.api.v1.router import api_router
 from threat_sentinel_api.core.config import get_settings
 from threat_sentinel_api.core.logging import configure_logging, get_logger
+from threat_sentinel_api.modules.identity.lifecycle_service import AccountLifecycleConflict
 from threat_sentinel_api.modules.identity.service import InvalidPrincipalError
 from threat_sentinel_api.modules.scans.service import ScanNotFound
 from threat_sentinel_api.modules.tenants.service import (
@@ -144,9 +145,10 @@ async def organization_permission_denied_handler(
 
 
 @app.exception_handler(OrganizationConflict)
+@app.exception_handler(AccountLifecycleConflict)
 async def organization_conflict_handler(
     _: Request,
-    _exc: OrganizationConflict,
+    _exc: OrganizationConflict | AccountLifecycleConflict,
 ) -> JSONResponse:
     return _authorization_error_response(409)
 

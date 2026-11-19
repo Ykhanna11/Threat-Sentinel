@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import (
@@ -123,6 +124,14 @@ class AccountProfileUpdate(BaseModel):
         if not normalized:
             raise ValueError("display_name must not be blank")
         return normalized
+
+
+class AccountDeactivationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    confirmation: Literal["DEACTIVATE"] = Field(
+        description="Explicitly confirm deactivation of the authenticated account."
+    )
 
 
 class AccountProfileResponse(BaseModel):

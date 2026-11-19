@@ -2,6 +2,31 @@
 
 These decisions describe the current architecture and its boundaries; they do not imply that deferred product capabilities have been implemented.
 
+## Phase 2D.2 account lifecycle and recovery
+
+The [account lifecycle assessment](./account-lifecycle-assessment.md) records the trust model,
+state transitions, owner consequences, and recovery decision for this phase.
+
+- `User.status` has the existing `active`, `suspended`, and `deactivated` values. Authentication
+  and protected operations reject non-active local users. No account suspension authority or
+  reactivation authority exists.
+- `POST /api/v1/account/deactivate` permits an authenticated principal to explicitly deactivate
+  only its own active account. The request has a strict confirmation schema; it does not accept a
+  user ID or status. A deactivated account cannot use protected APIs, including to reactivate.
+- The operation preserves identity and membership history. Under the existing User → Organization
+  → Membership lock order it rejects deactivation when any organization would have no other active
+  OWNER backed by an active User. No owner role is transferred.
+- There is no provider administrative integration, platform control plane, organization owner
+  recovery authority, or durable audit-event store. Suspension, reactivation, privileged recovery,
+  and organization access restoration remain deferred. Application request logs are not an audit
+  trail.
+- Deactivation does not revoke external identity-provider sessions or already issued JWTs. The
+  local active-user check denies subsequent protected API requests after commit; in-flight work is
+  not retroactively cancelled.
+
+The status values predate this operation, so no migration is required. Do not mark Phase 2D
+complete while suspension, recovery, durable auditability, and owner-loss recovery remain absent.
+
 | Area | Decision |
 | --- | --- |
 | Repository | Monorepo with `apps/web`, `apps/api`, `packages/shared-contracts`, infrastructure, docs, scripts, and tests. |
@@ -165,9 +190,14 @@ Implemented account profile and organization/member/invitation lifecycle writers
 UPDATE` before validation or mutation, follow User → Organization → Invitation → Membership, sort
 same-type rows by UUID, and lock the Organization before creating/restoring a Membership. The
 explicit owner transfer locks both affected users, then changes both memberships atomically.
-Account suspension/deactivation, organization archival, privileged recovery, and identity
-reassignment remain unavailable; any future writer must comply with this lock protocol before its
-capability is exposed. Do not add a separate identity lock without a demonstrated requirement.
+Self-service account deactivation locks the authenticated User `FOR NO KEY UPDATE`, then locks
+every organization where that user has an active OWNER membership in UUID order, then locks all
+memberships in UUID order. It verifies under those locks that each organization retains another
+active OWNER backed by an active User before changing the local account status. No organization
+membership or role is deleted or transferred. Account suspension/reactivation, organization
+archival, privileged recovery, and identity reassignment remain unavailable; any future writer
+must comply with this lock protocol before its capability is exposed. Do not add a separate
+identity lock without a demonstrated requirement.
 
 Do not add retries, arbitrary lock timeouts, isolation changes, or authorization caching. A
 deadlock or other transient database failure must roll back the complete transaction, propagate

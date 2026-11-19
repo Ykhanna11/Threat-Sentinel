@@ -21,9 +21,15 @@ eligibility lookup, so an unauthorized organization member cannot use this endpo
 addresses. An authorized inviter can learn whether an address is eligible, which currently requires
 an existing active user with a verified identity; invitations to unregistered users are unsupported.
 
-Authenticated account-profile, organization, membership, and invitation API routes exist, but there
-is no account deletion/export flow, user-suspension control plane, invitation email delivery,
+Authenticated account-profile, organization, membership, and invitation API routes exist. A
+confirmed self-deactivation marks only the local account inactive; it preserves the User,
+ExternalIdentity, organization memberships, role assignments, and historical records. It is
+rejected if any organization would lose its last active OWNER. This is not account deletion or
+export, and it does not revoke a provider session or already issued JWT; protected API requests
+check the local status after commit. There is no user-suspension control plane, reactivation,
+privileged or organization recovery, durable lifecycle audit store, invitation email delivery,
 analysis endpoint, cloud inference integration, analytics pipeline, or production data store.
-Suspended organizations retain their memberships and historical records; pending invitations are
-revoked and are not restored on reactivation. Retention and deletion controls remain a pre-production
-requirement.
+Suspended organizations retain memberships and historical records; pending invitations are revoked
+and are not restored on reactivation. Retention and deletion controls remain a pre-production
+requirement. See the [account lifecycle assessment](../architecture/account-lifecycle-assessment.md)
+for trust and recovery limitations.

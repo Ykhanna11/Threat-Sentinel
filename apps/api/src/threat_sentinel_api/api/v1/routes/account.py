@@ -6,12 +6,14 @@ from sqlalchemy.orm import Session
 from threat_sentinel_api.api.dependencies import get_current_principal
 from threat_sentinel_api.db.session import unit_of_work
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
+from threat_sentinel_api.modules.identity.lifecycle_service import AccountLifecycleService
+from threat_sentinel_api.modules.identity.profile_service import AccountProfileService
 from threat_sentinel_api.modules.identity.schemas import (
+    AccountDeactivationRequest,
     AccountProfileResponse,
     AccountProfileUpdate,
     AuthenticatedPrincipal,
 )
-from threat_sentinel_api.modules.identity.profile_service import AccountProfileService
 
 router = APIRouter(prefix="/account", tags=["account"])
 
@@ -43,3 +45,22 @@ def update_profile(
 ) -> AccountProfileResponse:
     with unit_of_work() as session:
         return _service(session).update_profile(principal, update)
+
+
+@router.post(
+    "/deactivate",
+    status_code=204,
+    summary="Deactivate the authenticated account",
+    description=(
+        "Deactivates only this local account. This API has no reactivation or recovery route, and "
+        "the account loses protected API access even if its identity-provider session or an issued "
+        "JWT remains valid. Historical records and organization memberships are retained. "
+        "Deactivation is rejected if it would leave any organization without another active owner."
+    ),
+)
+def deactivate_account(
+    confirmation: AccountDeactivationRequest,
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+) -> None:
+    with unit_of_work() as session:
+        AccountLifecycleService(session).deactivate(principal)

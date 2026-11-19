@@ -71,7 +71,7 @@ invitation state.
 - Organization listing locks User first, then all related Organization rows and Membership rows in sorted UUID order. It loads inactive memberships as well as active ones before locking; the User lock coordinates with protocol-compliant membership writers and prevents phantom memberships during result materialization.
 - Organization creation locks the identity's User `FOR SHARE`, checks active status after acquiring the lock, and retains it through insertion of the Organization and initial OWNER Membership in one route-owned transaction. Pending invitations have a database-enforced unique key per organization and normalized email (lowercase and trimmed); terminal invitations do not block reissue.
 - Invitation records bind to a specific verified external identity, store only a SHA-256 token hash, expire after seven days, and transition atomically with membership activation. The raw token is returned only by the authorized invitation-create response; there is no email delivery integration. Suspension revokes pending invitations; reactivation does not restore them.
-- Lifecycle endpoints use server-side tenant scoping and role checks. Membership changes and ownership transfers run under the canonical row-lock order and validate the active-owner invariant. Organization suspension/reactivation is owner-controlled. There is no account suspend/reactivate or platform recovery endpoint because no legitimate administrative control plane exists.
+- Lifecycle endpoints use server-side tenant scoping and role checks. Membership changes, ownership transfers, and explicit self-deactivation run under the canonical row-lock order and validate the active-owner invariant. A user may deactivate only their own active account; owner memberships and historical records remain. Organization suspension/reactivation is owner-controlled. There is no account suspension/reactivation or platform/organization recovery endpoint because no legitimate administrative control plane exists. See the [Phase 2D.2 account lifecycle assessment](./account-lifecycle-assessment.md).
 - `get_session()` is a request-scoped session resource, not a commit boundary. Mutating application operations must run inside `unit_of_work()`, which owns commit on success, rollback on exceptions, and session closure.
 - `require_active_owner()` validates projected membership state before role/status changes and ownership transfer. Removed memberships cannot be changed directly; a valid invitation may reactivate an eligible non-owner membership. An owner may not be removed or demoted by the general membership endpoint; ownership changes use the explicit transfer operation.
 
@@ -138,6 +138,7 @@ not imply remote CI success, production deployment, or readiness. See the
 Protected scan persistence and the lifecycle API described in the
 [Phase 2 roadmap](./phase-2-roadmap.md) are implemented. Scan execution and analysis, OIDC
 discovery and browser login flows, invitation email delivery, account suspension/reactivation,
-administrative recovery, a general fine-grained permissions framework, detection, risk assessment,
-AI inference, investigations, intelligence feeds, billing, developer integrations, security audit
-storage, frontend lifecycle UI, and production deployment remain future capabilities.
+privileged and organization recovery, a general fine-grained permissions framework, detection,
+risk assessment, AI inference, investigations, intelligence feeds, billing, developer
+integrations, durable security audit storage, frontend lifecycle UI, and production deployment
+remain future capabilities.
