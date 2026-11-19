@@ -53,6 +53,8 @@ from threat_sentinel_api.modules.tenants.schemas import (
 from threat_sentinel_api.modules.tenants.service import (
     ActiveUserRequired,
     OrganizationAccessDenied,
+    OrganizationConflict,
+    OrganizationPermissionDenied,
     OrganizationService,
 )
 
@@ -1093,14 +1095,22 @@ def test_concurrent_invitation_acceptance_consumes_token_once(
         email_verified=True,
     )
     organization_id = authorization_data.create_organization(owner)
+    details = InvitationCreate(
+        email=invitee.principal.email or "",
+        role=OrganizationRole.MEMBER,
+    )
+    with unit_of_work(postgres_session_factory) as session:
+        recipient = OrganizationLifecycleService(session).authorize_invitation(
+            owner.principal,
+            organization_id,
+            details,
+        )
     with unit_of_work(postgres_session_factory) as session:
         invitation, token = OrganizationLifecycleService(session).create_invitation(
             owner.principal,
             organization_id,
-            InvitationCreate(
-                email=invitee.principal.email or "",
-                role=OrganizationRole.MEMBER,
-            ),
+            details,
+            recipient,
         )
         invitation_id = invitation.id
 
@@ -1135,6 +1145,129 @@ def test_concurrent_invitation_acceptance_consumes_token_once(
                 )
             )
             == 1
+        )
+
+
+def test_concurrent_invitation_creation_keeps_authorization_and_lock_order(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    owner = authorization_data.create_user()
+    invitee = authorization_data.create_user(
+        email=f"{uuid4()}@example.test",
+        email_verified=True,
+    )
+    organization_id = authorization_data.create_organization(owner)
+    details = InvitationCreate(
+        email=invitee.principal.email or "",
+        role=OrganizationRole.MEMBER,
+    )
+    barrier = Barrier(2)
+    bounded_factory = _session_factory_with_postgres_timeouts(postgres_session_factory)
+
+    def create_invitation() -> bool:
+        barrier.wait(timeout=5)
+        with unit_of_work(bounded_factory) as session:
+            recipient = OrganizationLifecycleService(session).authorize_invitation(
+                owner.principal,
+                organization_id,
+                details,
+            )
+        try:
+            with unit_of_work(bounded_factory) as session:
+                OrganizationLifecycleService(session).create_invitation(
+                    owner.principal,
+                    organization_id,
+                    details,
+                    recipient,
+                )
+        except OrganizationConflict:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(create_invitation) for _ in range(2)]
+        results = [future.result(timeout=15) for future in futures]
+
+    assert sorted(results) == [False, True]
+    with postgres_session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(OrganizationInvitation)
+                .where(
+                    OrganizationInvitation.organization_id == organization_id,
+                    OrganizationInvitation.status == InvitationStatus.PENDING,
+                    OrganizationInvitation.intended_email == details.email,
+                )
+            )
+            == 1
+        )
+
+
+def test_invitation_rechecks_role_after_authorization_uow(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    owner = authorization_data.create_user()
+    admin = authorization_data.create_user()
+    invitee = authorization_data.create_user(
+        email=f"{uuid4()}@example.test",
+        email_verified=True,
+    )
+    organization_id = authorization_data.create_organization(
+        owner,
+        membership_user=admin,
+        role=OrganizationRole.ADMIN,
+    )
+    details = InvitationCreate(
+        email=invitee.principal.email or "",
+        role=OrganizationRole.MEMBER,
+    )
+    with unit_of_work(postgres_session_factory) as session:
+        recipient = OrganizationLifecycleService(session).authorize_invitation(
+            admin.principal,
+            organization_id,
+            details,
+        )
+
+    with postgres_session_factory() as session:
+        admin_membership_id = session.scalar(
+            select(OrganizationMembership.id).where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationMembership.user_id == admin.user_id,
+            )
+        )
+    assert admin_membership_id is not None
+    with unit_of_work(postgres_session_factory) as session:
+        OrganizationLifecycleService(session).update_membership(
+            owner.principal,
+            organization_id,
+            admin_membership_id,
+            MembershipUpdate(role=OrganizationRole.MEMBER),
+        )
+
+    with pytest.raises(OrganizationPermissionDenied):
+        with unit_of_work(postgres_session_factory) as session:
+            OrganizationLifecycleService(session).create_invitation(
+                admin.principal,
+                organization_id,
+                details,
+                recipient,
+            )
+
+    with postgres_session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(OrganizationInvitation)
+                .where(
+                    OrganizationInvitation.organization_id == organization_id,
+                    OrganizationInvitation.status == InvitationStatus.PENDING,
+                    OrganizationInvitation.intended_email == details.email,
+                )
+            )
+            == 0
         )
 
 

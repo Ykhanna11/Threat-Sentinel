@@ -13,7 +13,7 @@ independent security review is implied.
 | 2D.2 — Account profile | Implemented and tested | `GET`/`PATCH /api/v1/account/profile` expose only the account's `display_name` and creation time. `PATCH` rejects extra/protected fields and operates only on the authenticated principal's account. |
 | 2D.3 — Organization lifecycle | Implemented and tested | Authenticated users can create and list organizations; creation and initial active OWNER membership share one transaction. Owner/admin detail updates are tenant-scoped. Owners can suspend/reactivate an organization; suspension revokes pending invitations and reactivation does not revive them. |
 | 2D.4 — Membership lifecycle and ownership | Implemented and tested | Authorized members can list memberships. Owner/admin role and status changes are restricted by the existing role policy; invitations add/restore eligible memberships. Only an owner can transfer ownership to another active member. An active owner is retained across protected changes. |
-| 2D.5 — Invitation lifecycle | Implemented and tested | Owners/admins create invitations within role limits; owners alone may invite admins. Tokens are random, single-use, expire after seven days, and only SHA-256 hashes are persisted. Acceptance requires the exact verified identity bound at invitation creation. Tokens are returned once in the authorized create response. |
+| 2D.5 — Invitation lifecycle | Implemented and tested | The active caller, organization, membership, and invitation-role permission are checked before recipient eligibility is queried. Owners/admins create invitations within role limits; owners alone may invite admins. Tokens are random, single-use, expire after seven days, and only SHA-256 hashes are persisted. Acceptance requires the exact verified identity bound at invitation creation. Only authorized inviters can learn whether an address is eligible; invitations still require an existing active user with a verified identity. Tokens are returned once in the authorized create response. |
 | 2D.6 — PostgreSQL constraints and concurrency | Implemented and locally validated | Alembic adds profile/invitation constraints and invalidates legacy pending invitations that lack secure token/identity binding. PostgreSQL 17 tests exercise ownership, membership, invitation, identity-onboarding races, rollback, and the canonical User → Organization → Invitation → Membership lock order. Migration downgrade/re-upgrade and `alembic check` passed locally. |
 | 2D.7 — Account suspension, deactivation, recovery | Deferred by design | No legitimate administrative/recovery actor or lifecycle control plane exists. Users cannot self-assign these privileged transitions. Existing inactive accounts are denied; onboarding cannot reactivate them. |
 | 2D.8 — Organization archival and platform recovery | Unavailable | Owner-authorized suspension/reactivation is implemented. No archival endpoint, platform administrator, organization recovery flow, or hidden bypass is introduced. |
@@ -51,6 +51,16 @@ ownership transfers validate the projected membership state before flushing. Onl
 atomic owner transfer may replace the active owner role. Organization suspension holds the
 organization lifecycle lock and revokes pending invitations in the same transaction. No locks are
 held across network calls.
+
+Invitation creation first uses a short authorization UOW that locks and validates the caller User,
+Organization, and Membership in that order. Only after the role check does it query recipient
+eligibility; that query does not lock the recipient User. The UOW releases its locks before the
+creation UOW, which follows the full User → Organization → Invitation → Membership order and
+revalidates the caller, recipient identity, account status, organization, and role before writing.
+An authorization change between the two UOWs therefore fails closed. Unauthorized callers do not
+reach recipient lookup; an authorized inviter can distinguish an eligible recipient from an
+unregistered, unverified, or inactive recipient. Invitations to users without an existing verified
+identity remain unsupported.
 
 ## Validation and remaining work
 

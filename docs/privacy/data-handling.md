@@ -16,7 +16,10 @@ remain attached to the external identity. Email is never an account-link key. Or
 invitations retain the intended email, identity reference, inviter, role, and lifecycle timestamps;
 these fields are personal data and require a deliberate retention/deletion policy before production
 use. Invitation tokens are returned once to the authorized creator; only a SHA-256 token hash is
-stored. No email delivery service is integrated.
+stored. No email delivery service is integrated. Invitation authorization is checked before recipient
+eligibility lookup, so an unauthorized organization member cannot use this endpoint to test arbitrary
+addresses. An authorized inviter can learn whether an address is eligible, which currently requires
+an existing active user with a verified identity; invitations to unregistered users are unsupported.
 
 Authenticated account-profile, organization, membership, and invitation API routes exist, but there
 is no account deletion/export flow, user-suspension control plane, invitation email delivery,

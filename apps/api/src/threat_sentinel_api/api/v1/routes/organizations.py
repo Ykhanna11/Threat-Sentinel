@@ -9,6 +9,7 @@ from threat_sentinel_api.api.dependencies import get_current_principal
 from threat_sentinel_api.db.session import unit_of_work
 from threat_sentinel_api.modules.identity.models import User
 from threat_sentinel_api.modules.identity.schemas import AuthenticatedPrincipal
+from threat_sentinel_api.modules.identity.service import InvalidPrincipalError
 from threat_sentinel_api.modules.tenants.lifecycle_service import (
     InvitationUnavailable,
     OrganizationLifecycleService,
@@ -27,7 +28,11 @@ from threat_sentinel_api.modules.tenants.schemas import (
     OrganizationUpdate,
     OwnershipTransfer,
 )
-from threat_sentinel_api.modules.tenants.service import OrganizationConflict, OrganizationService
+from threat_sentinel_api.modules.tenants.service import (
+    OrganizationConflict,
+    OrganizationPermissionDenied,
+    OrganizationService,
+)
 
 router = APIRouter(tags=["organizations"])
 
@@ -240,12 +245,20 @@ def create_invitation(
     principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
     http_response: Response,
 ) -> InvitationResponse:
+    with unit_of_work() as session:
+        recipient = OrganizationLifecycleService(session).authorize_invitation(
+            principal,
+            organization_id,
+            details,
+        )
+
     try:
         with unit_of_work() as session:
             invitation, token = OrganizationLifecycleService(session).create_invitation(
                 principal,
                 organization_id,
                 details,
+                recipient,
             )
             response = InvitationResponse(
                 id=invitation.id,
@@ -254,6 +267,8 @@ def create_invitation(
                 expires_at=invitation.expires_at,
                 token=token,
             )
+    except (InvalidPrincipalError, OrganizationPermissionDenied):
+        raise InvitationUnavailable("The invitation is unavailable.") from None
     except IntegrityError as error:
         if _is_pending_invitation_conflict(error):
             raise OrganizationConflict("A pending invitation already exists.") from None

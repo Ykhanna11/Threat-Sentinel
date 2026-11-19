@@ -84,6 +84,11 @@ This document defines engineering principles for future implementation. The curr
 - **Protect invitation tokens:** invitations are bound to an exact verified external identity;
   only a SHA-256 token hash is stored. Raw invitation tokens are returned once to the authorized
   creator, accepted once before expiry, and never logged. No email delivery is claimed.
+- **Authorize before recipient lookup:** invitation creation validates the active caller, active
+  organization, active membership, and role permission before querying recipient eligibility.
+  Unauthorized roles and callers outside the organization do not reach the email-to-identity lookup.
+  An authorized inviter can learn whether an address maps to an active user with a verified
+  identity; invitations to unregistered, unverified, or inactive recipients are not supported.
 - **Avoid credential persistence:** access tokens, refresh tokens, and raw invitation bearer tokens
   are not persisted. Never log credentials, claims payloads, or invitation secrets.
 - **Protect secrets:** keep credentials out of source control and logs; use a managed secret store in deployed environments. The committed `.env.example` contains local-only values.
@@ -138,11 +143,16 @@ resource in the same UOW.
 
 Implemented account profile and organization/member/invitation lifecycle writers acquire `FOR NO
 KEY UPDATE` before validation or mutation, follow User → Organization → Invitation → Membership,
-and sort same-type rows by UUID. Membership creation/restoration locks the Organization before
-inserting/restoring a Membership. Account suspension/deactivation, organization archival,
-privileged recovery, and identity reassignment are not exposed because there is no legitimate
-control plane or use case. Any future writer must meet this contract before its capability is
-exposed. Do not hold locks across network calls, AI inference, or lengthy scan execution.
+and sort same-type rows by UUID. Invitation creation has a short authorization UOW that locks User
+→ Organization → Membership, checks the requested role, and only then performs a non-locking
+recipient identity lookup. It releases those locks before the write UOW, which reacquires User rows
+in UUID order and follows User → Organization → Invitation → Membership while revalidating all
+authorization and recipient state. A change between UOWs fails closed; the initial check is not a
+grant. Membership creation/restoration locks the Organization before inserting/restoring a
+Membership. Account suspension/deactivation, organization archival, privileged recovery, and
+identity reassignment are not exposed because there is no legitimate control plane or use case. Any
+future writer must meet this contract before its capability is exposed. Do not hold locks across
+network calls, AI inference, or lengthy scan execution.
 
 PostgreSQL 17 integration tests use independent sessions/connections, deterministic events,
 bounded waits, and `pg_blocking_pids()` diagnostics. They cover lock blocking and ordering,

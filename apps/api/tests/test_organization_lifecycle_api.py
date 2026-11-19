@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from hashlib import sha256
@@ -16,8 +17,12 @@ from threat_sentinel_api.api import dependencies as auth_dependencies
 from threat_sentinel_api.api.v1.routes import account as account_routes
 from threat_sentinel_api.api.v1.routes import organizations as organization_routes
 from threat_sentinel_api.db import session as database_session
+from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
-from threat_sentinel_api.modules.identity.schemas import VerifiedAccessTokenClaims
+from threat_sentinel_api.modules.identity.schemas import (
+    AuthenticatedPrincipal,
+    VerifiedAccessTokenClaims,
+)
 from threat_sentinel_api.modules.tenants.enums import (
     InvitationStatus,
     MembershipStatus,
@@ -29,8 +34,12 @@ from threat_sentinel_api.modules.tenants.models import (
     OrganizationInvitation,
     OrganizationMembership,
 )
+from threat_sentinel_api.modules.tenants.lifecycle_repository import (
+    OrganizationLifecycleRepository,
+)
+from threat_sentinel_api.modules.tenants.lifecycle_service import OrganizationLifecycleService
 from threat_sentinel_api.modules.tenants.repository import OrganizationRepository
-from threat_sentinel_api.modules.tenants.schemas import OrganizationCreate
+from threat_sentinel_api.modules.tenants.schemas import MembershipUpdate, OrganizationCreate
 
 ISSUER = "https://organization-api.example"
 
@@ -104,6 +113,18 @@ def _identity_id(session: Session, email: str) -> UUID | None:
             ExternalIdentity.email_verified_at.is_not(None),
         )
     )
+
+
+def _user_id_for_subject(factory: sessionmaker[Session], subject: str) -> UUID:
+    with factory() as session:
+        user_id = session.scalar(
+            select(ExternalIdentity.user_id).where(
+                ExternalIdentity.issuer == ISSUER,
+                ExternalIdentity.subject == subject,
+            )
+        )
+    assert user_id is not None
+    return user_id
 
 
 def test_organization_creation_assigns_owner_atomically_and_hides_other_tenants(
@@ -238,6 +259,289 @@ def test_invitation_is_hashed_single_use_and_bound_to_the_exact_verified_identit
         invitation = session.get(OrganizationInvitation, invitation_id)
         assert invitation is not None
         assert invitation.status is InvitationStatus.ACCEPTED
+
+
+def test_unauthorized_members_cannot_enumerate_invitation_recipients(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Invitation authorization", "slug": "invitation-authorization"},
+    ).json()
+    organization_id = UUID(organization["id"])
+
+    identities = (
+        ("known-recipient", "known@example.test"),
+        ("viewer-user", "viewer@example.test"),
+        ("member-user", "member@example.test"),
+    )
+    for subject, email in identities:
+        _select_identity(provider, subject, email)
+        assert client.get("/api/v1/account/profile").status_code == 200
+
+    viewer_user_id = _user_id_for_subject(factory, "viewer-user")
+    member_user_id = _user_id_for_subject(factory, "member-user")
+    with factory() as session, session.begin():
+        session.add_all(
+            [
+                OrganizationMembership(
+                    organization_id=organization_id,
+                    user_id=viewer_user_id,
+                    role=OrganizationRole.VIEWER,
+                    status=MembershipStatus.ACTIVE,
+                ),
+                OrganizationMembership(
+                    organization_id=organization_id,
+                    user_id=member_user_id,
+                    role=OrganizationRole.MEMBER,
+                    status=MembershipStatus.ACTIVE,
+                ),
+            ]
+        )
+
+    lookup_emails: list[str] = []
+    find_verified_identity = OrganizationLifecycleRepository.find_verified_identity_for_email
+
+    def record_recipient_lookup(
+        repository: OrganizationLifecycleRepository,
+        email: str,
+    ) -> tuple[UUID, UUID] | None:
+        lookup_emails.append(email)
+        return find_verified_identity(repository, email)
+
+    monkeypatch.setattr(
+        OrganizationLifecycleRepository,
+        "find_verified_identity_for_email",
+        record_recipient_lookup,
+    )
+
+    for subject in ("viewer-user", "member-user"):
+        _select_identity(provider, subject)
+        responses = [
+            client.post(
+                f"/api/v1/organizations/{organization_id}/invitations",
+                json={"email": email, "role": "member"},
+            )
+            for email in ("known@example.test", "unknown@example.test")
+        ]
+        assert [response.status_code for response in responses] == [403, 403]
+        assert responses[0].json() == responses[1].json()
+        assert responses[0].json() == {
+            "error": {
+                "code": "http_error",
+                "message": "The request could not be completed.",
+            }
+        }
+
+    assert lookup_emails == []
+
+
+def test_invitation_scope_and_inactive_user_are_checked_before_recipient_lookup(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    target_organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Target", "slug": "invitation-target"},
+    ).json()
+    target_organization_id = UUID(target_organization["id"])
+
+    _select_identity(provider, "known-recipient", "known@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    _select_identity(provider, "invitation-outsider", "outsider@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    own_organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Outsider", "slug": "invitation-outsider"},
+    )
+    assert own_organization.status_code == 201
+
+    lookup_emails: list[str] = []
+    find_verified_identity = OrganizationLifecycleRepository.find_verified_identity_for_email
+
+    def record_recipient_lookup(
+        repository: OrganizationLifecycleRepository,
+        email: str,
+    ) -> tuple[UUID, UUID] | None:
+        lookup_emails.append(email)
+        return find_verified_identity(repository, email)
+
+    monkeypatch.setattr(
+        OrganizationLifecycleRepository,
+        "find_verified_identity_for_email",
+        record_recipient_lookup,
+    )
+
+    _select_identity(provider, "invitation-outsider", "outsider@example.test")
+    outsider_responses = [
+        client.post(
+            f"/api/v1/organizations/{target_organization_id}/invitations",
+            json={"email": email, "role": "member"},
+        )
+        for email in ("known@example.test", "unknown@example.test")
+    ]
+    assert [response.status_code for response in outsider_responses] == [404, 404]
+    assert outsider_responses[0].json() == outsider_responses[1].json()
+
+    _select_identity(provider, "organization-owner")
+    assert client.post(f"/api/v1/organizations/{target_organization_id}/suspend").status_code == 200
+    inactive_organization_responses = [
+        client.post(
+            f"/api/v1/organizations/{target_organization_id}/invitations",
+            json={"email": email, "role": "member"},
+        )
+        for email in ("known@example.test", "unknown@example.test")
+    ]
+    assert [response.status_code for response in inactive_organization_responses] == [404, 404]
+    assert inactive_organization_responses[0].json() == inactive_organization_responses[1].json()
+
+    assert (
+        client.post(f"/api/v1/organizations/{target_organization_id}/reactivate").status_code == 200
+    )
+    owner_user_id = _user_id_for_subject(factory, "organization-owner")
+    with factory() as session, session.begin():
+        owner = session.get(User, owner_user_id)
+        assert owner is not None
+        owner.status = UserStatus.SUSPENDED
+
+    inactive_user_responses = [
+        client.post(
+            f"/api/v1/organizations/{target_organization_id}/invitations",
+            json={"email": email, "role": "member"},
+        )
+        for email in ("known@example.test", "unknown@example.test")
+    ]
+    assert [response.status_code for response in inactive_user_responses] == [401, 401]
+    assert inactive_user_responses[0].json() == inactive_user_responses[1].json()
+    assert lookup_emails == []
+
+
+def test_invitation_fails_if_admin_is_demoted_after_preflight(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Authorization race", "slug": "authorization-race"},
+    ).json()
+    organization_id = UUID(organization["id"])
+
+    _select_identity(provider, "organization-admin", "admin@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    _select_identity(provider, "eligible-recipient", "eligible@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+
+    admin_user_id = _user_id_for_subject(factory, "organization-admin")
+    with factory() as session, session.begin():
+        admin_membership = OrganizationMembership(
+            organization_id=organization_id,
+            user_id=admin_user_id,
+            role=OrganizationRole.ADMIN,
+            status=MembershipStatus.ACTIVE,
+        )
+        session.add(admin_membership)
+        session.flush()
+        admin_membership_id = admin_membership.id
+
+    with factory() as session:
+        owner_identity = session.scalar(
+            select(ExternalIdentity).where(
+                ExternalIdentity.issuer == ISSUER,
+                ExternalIdentity.subject == "organization-owner",
+            )
+        )
+        assert owner_identity is not None
+        owner_principal = AuthenticatedPrincipal(
+            user_id=owner_identity.user_id,
+            external_identity_id=owner_identity.id,
+            issuer=owner_identity.issuer,
+            subject=owner_identity.subject,
+            email=owner_identity.email,
+            email_verified=owner_identity.email_verified_at is not None,
+        )
+
+    original_unit_of_work = organization_routes.unit_of_work
+    unit_of_work_calls = 0
+    demotion_committed = False
+
+    @contextmanager
+    def demoting_unit_of_work() -> Iterator[Session]:
+        nonlocal unit_of_work_calls, demotion_committed
+        unit_of_work_calls += 1
+        with original_unit_of_work() as session:
+            yield session
+        if unit_of_work_calls == 1:
+            with database_session.unit_of_work(factory) as session:
+                OrganizationLifecycleService(session).update_membership(
+                    owner_principal,
+                    organization_id,
+                    admin_membership_id,
+                    MembershipUpdate(role=OrganizationRole.MEMBER),
+                )
+            demotion_committed = True
+
+    lookup_emails: list[str] = []
+    find_verified_identity = OrganizationLifecycleRepository.find_verified_identity_for_email
+
+    def record_recipient_lookup(
+        repository: OrganizationLifecycleRepository,
+        email: str,
+    ) -> tuple[UUID, UUID] | None:
+        lookup_emails.append(email)
+        return find_verified_identity(repository, email)
+
+    monkeypatch.setattr(
+        OrganizationLifecycleRepository,
+        "find_verified_identity_for_email",
+        record_recipient_lookup,
+    )
+    monkeypatch.setattr(organization_routes, "unit_of_work", demoting_unit_of_work)
+
+    _select_identity(provider, "organization-admin", "admin@example.test")
+    response = client.post(
+        f"/api/v1/organizations/{organization_id}/invitations",
+        json={"email": "eligible@example.test", "role": "member"},
+    )
+
+    assert demotion_committed
+    assert unit_of_work_calls == 2
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "http_error",
+            "message": "The request could not be completed.",
+        }
+    }
+    assert lookup_emails == ["eligible@example.test"]
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(OrganizationInvitation)
+                .where(
+                    OrganizationInvitation.organization_id == organization_id,
+                    OrganizationInvitation.intended_email == "eligible@example.test",
+                    OrganizationInvitation.status == InvitationStatus.PENDING,
+                )
+            )
+            == 0
+        )
+        assert (
+            session.scalar(
+                select(OrganizationMembership.role).where(
+                    OrganizationMembership.organization_id == organization_id,
+                    OrganizationMembership.user_id == admin_user_id,
+                )
+            )
+            is OrganizationRole.MEMBER
+        )
 
 
 def test_role_checks_ownership_transfer_and_owner_lifecycle(

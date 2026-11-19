@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import secrets
@@ -40,6 +41,12 @@ from threat_sentinel_api.modules.tenants.service import (
 )
 
 INVITATION_TTL = timedelta(days=7)
+
+
+@dataclass(frozen=True)
+class VerifiedInvitationRecipient:
+    identity_id: UUID
+    user_id: UUID
 
 
 class MembershipNotFound(LookupError):
@@ -249,30 +256,50 @@ class OrganizationLifecycleService:
         self._session.flush()
         return owner_membership, target_membership
 
+    def authorize_invitation(
+        self,
+        principal: AuthenticatedPrincipal,
+        organization_id: UUID,
+        details: InvitationCreate,
+    ) -> VerifiedInvitationRecipient:
+        users = self._repository.lock_principal_users_for_update(principal)
+        self._require_active_user(users[principal.user_id])
+        organization = self._repository.lock_organization_for_update(organization_id)
+        if organization is None or organization.status is not OrganizationStatus.ACTIVE:
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
+        memberships = self._repository.lock_memberships_for_update(organization_id)
+        actor_membership = self._require_active_membership(memberships, principal.user_id)
+        self._require_can_invite(actor_membership.role, details.role)
+
+        intended_identity = self._repository.find_verified_identity_for_email(details.email)
+        if intended_identity is None:
+            raise InvitationUnavailable("The invitation is unavailable.")
+        identity_id, user_id = intended_identity
+        if user_id == principal.user_id:
+            raise OrganizationPermissionDenied("The user cannot invite their own account.")
+        return VerifiedInvitationRecipient(identity_id=identity_id, user_id=user_id)
+
     def create_invitation(
         self,
         principal: AuthenticatedPrincipal,
         organization_id: UUID,
         details: InvitationCreate,
+        recipient: VerifiedInvitationRecipient,
     ) -> tuple[OrganizationInvitation, str]:
-        intended_identity = self._repository.find_verified_identity_for_email(details.email)
-        if intended_identity is None:
-            raise InvitationUnavailable("The invitation is unavailable.")
-        intended_identity_id, intended_user_id = intended_identity
-        if intended_user_id == principal.user_id:
+        if recipient.user_id == principal.user_id:
             raise OrganizationPermissionDenied("The user cannot invite their own account.")
         users = self._repository.lock_principal_users_for_update(
             principal,
-            (intended_user_id,),
+            (recipient.user_id,),
         )
         self._require_active_user(users[principal.user_id])
-        intended_user = users.get(intended_user_id)
+        intended_user = users.get(recipient.user_id)
         if (
             intended_user is None
             or intended_user.status is not UserStatus.ACTIVE
             or not self._repository.is_verified_identity_for_email(
-                intended_identity_id,
-                intended_user_id,
+                recipient.identity_id,
+                recipient.user_id,
                 details.email,
             )
         ):
@@ -284,7 +311,7 @@ class OrganizationLifecycleService:
         memberships = self._repository.lock_memberships_for_update(organization_id)
         actor_membership = self._require_active_membership(memberships, principal.user_id)
         self._require_can_invite(actor_membership.role, details.role)
-        existing_membership = self._membership_for_user(memberships, intended_user_id)
+        existing_membership = self._membership_for_user(memberships, recipient.user_id)
         if (
             existing_membership is not None
             and existing_membership.status is MembershipStatus.ACTIVE
@@ -306,7 +333,7 @@ class OrganizationLifecycleService:
             organization_id=organization_id,
             inviter_user_id=principal.user_id,
             intended_email=details.email,
-            intended_identity_id=intended_identity_id,
+            intended_identity_id=recipient.identity_id,
             token_hash=sha256(token.encode("ascii")).hexdigest(),
             role=details.role,
             expires_at=now + INVITATION_TTL,
