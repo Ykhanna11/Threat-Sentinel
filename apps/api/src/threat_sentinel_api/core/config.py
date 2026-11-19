@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     auth_clock_skew_seconds: int = Field(default=30, ge=0, le=120)
     auth_jwks_cache_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     auth_jwks_cache_max_entries: int = Field(default=16, ge=1, le=100)
+    sensitive_rate_limit_requests: int = Field(default=30, ge=1, le=1000)
+    sensitive_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
 
     model_config = SettingsConfigDict(
         env_file=REPOSITORY_ROOT / ".env",

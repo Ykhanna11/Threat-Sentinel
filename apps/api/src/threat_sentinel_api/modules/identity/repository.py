@@ -15,6 +15,10 @@ class IdentityRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    @property
+    def session(self) -> Session:
+        return self._session
+
     def find_by_issuer_subject(self, issuer: str, subject: str) -> ExternalIdentity | None:
         statement = select(ExternalIdentity).where(
             ExternalIdentity.issuer == issuer,

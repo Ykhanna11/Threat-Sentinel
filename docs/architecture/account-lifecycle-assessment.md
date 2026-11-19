@@ -92,16 +92,21 @@ ownership is inferred. Runtime locks require no schema change.
 
 ## Recovery, session, and audit limits
 
-There is no durable audit-event store. Structured request/error logs do not establish an audit
-trail, and this work must not claim auditability. Account deactivation does not revoke a provider
+Durable audit events now record supported account and organization transitions, with actor,
+organization, target, timestamp, outcome, and bounded request correlation. Actor attribution
+comes from the verified server-side principal. Structured request/error logs remain distinct and
+do not replace audit provenance. Database audit storage is not immutable against a database
+administrator and does not revoke provider sessions or implement a privileged recovery authority. Account deactivation does not revoke a provider
 session. The application stores no refresh-session or token-revocation state, but it resolves the
 local account status on protected requests; after a committed deactivation, subsequent protected
 API authentication is denied even when an otherwise-valid access token is presented. A request
 already authorized before the status change is not retroactively cancelled.
 
-Suspension, account reactivation, privileged recovery, administrative owner restoration, and
-durable security audit events require a separately designed trust/control plane and explicit
-revocation, audit, and emergency-access policies. No such plane is created in this phase.
+Suspension, account reactivation, privileged recovery, and administrative owner restoration
+require a separately designed trust/control plane and explicit revocation, audit, and
+emergency-access policies. No such plane is created in this phase. Durable audit events for
+supported application transitions are database-backed; audit retention and deletion remain
+operational policy decisions.
 
 ## Design decision
 
@@ -114,5 +119,6 @@ memberships. No migration is needed because the state column and check constrain
 
 The change must use the existing User → Organization → Membership lock order and include
 PostgreSQL integration coverage for concurrent owner deactivations and owner-retention behavior.
-No durable audit mechanism exists; that blocker and the absence of reactivation/organization
-recovery must remain explicit in the roadmap and security/privacy documentation.
+Durable audit events for supported application transitions exist; privileged account
+reactivation and organization recovery remain blocked and must stay explicit in the roadmap and
+security/privacy documentation.

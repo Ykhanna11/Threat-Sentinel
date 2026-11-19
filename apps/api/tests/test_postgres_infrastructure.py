@@ -13,12 +13,13 @@ def test_postgres_17_database_is_initialized_from_alembic_migrations(
 
     assert version is not None
     assert int(version) // 10000 == 17
-    assert revision == "39ac72e0fd51"
+    assert revision == "c7b1e4a2d903"
     assert {
         "users",
         "external_identities",
         "organizations",
         "organization_memberships",
         "organization_invitations",
+        "security_audit_events",
         "security_scans",
     }.issubset(inspect(postgres_migrated_engine).get_table_names())

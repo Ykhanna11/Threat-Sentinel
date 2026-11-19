@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from threat_sentinel_api.api.audit import audit_authorization_denials
 from threat_sentinel_api.api.dependencies import get_current_principal
 from threat_sentinel_api.db.session import unit_of_work
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
@@ -10,6 +11,7 @@ from threat_sentinel_api.modules.identity.lifecycle_service import AccountLifecy
 from threat_sentinel_api.modules.identity.profile_service import AccountProfileService
 from threat_sentinel_api.modules.identity.schemas import (
     AccountDeactivationRequest,
+    AccountExportResponse,
     AccountProfileResponse,
     AccountProfileUpdate,
     AuthenticatedPrincipal,
@@ -45,6 +47,25 @@ def update_profile(
 ) -> AccountProfileResponse:
     with unit_of_work() as session:
         return _service(session).update_profile(principal, update)
+
+
+@router.get(
+    "/export",
+    response_model=AccountExportResponse,
+    summary="Export authenticated account data",
+)
+def export_account(
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+) -> AccountExportResponse:
+    with audit_authorization_denials(
+        principal,
+        "account.export_denied",
+        target_type="user",
+        target_id=principal.user_id,
+        unit_of_work_factory=lambda: unit_of_work(),
+    ):
+        with unit_of_work() as session:
+            return _service(session).export_account(principal)
 
 
 @router.post(

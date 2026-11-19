@@ -95,7 +95,18 @@ This document defines engineering principles for future implementation. The curr
   are not persisted. Never log credentials, claims payloads, or invitation secrets.
 - **Protect secrets:** keep credentials out of source control and logs; use a managed secret store in deployed environments. The committed `.env.example` contains local-only values.
 - **Fail safely:** avoid returning stack traces, database details, submitted payloads, or secrets in client error responses. Keep health checks free of sensitive diagnostics.
-- **Keep an auditable trail:** future security-relevant changes require protected, tenant-scoped audit events with deliberate retention and access controls.
+- **Keep an auditable trail:** supported security-relevant changes append protected, tenant-scoped
+  database audit events with actor, tenant, target, timestamp, outcome, and bounded request
+  correlation. Actor attribution is the verified local principal user ID, not a client-supplied
+  identity or provider role claim. Database retention and integrity depend on operational backup,
+  access, and administrator controls; audit events are durable records, not tamper-proof logs.
+  Denial events are tenant-associated only when the verified actor has an active membership in the
+  active organization; cross-tenant denials are retained without a tenant association.
+  Successful mutation and audit writes share a transaction. If a denial audit cannot be persisted,
+  the operation remains denied but the client receives the generic `500` response instead of its
+  original generic `401`, `403`, or `404`. This fail-closed behavior prevents a success-shaped
+  response or committed protected mutation, at the cost of availability and denial-response
+  consistency while audit storage is unavailable.
 - **Use defense in depth:** require dependency updates, code review, automated checks, secure transport, least privilege, backups, and incident-response procedures before production use.
 - **Test security boundaries:** add threat modeling, input abuse cases, authorization and tenant-isolation tests, and secret/log redaction checks alongside the relevant features.
 
@@ -175,8 +186,9 @@ the locking protocol before exposure. See the
 
 The repository has a standalone JWT access-token verifier, a reusable FastAPI authentication
 dependency, a reusable tenant membership dependency, authenticated account/organization lifecycle
-routes (including explicit self-deactivation), and protected scan-persistence routes. No durable
-audit-event mechanism exists; request logs are not an auditable record of deactivation or recovery.
+routes (including explicit self-deactivation), and protected scan-persistence routes. Database
+audit events are implemented for supported transitions; request logs are not a replacement for
+audit records or durable integrity controls.
 The tenant dependency uses the existing
 active-membership check in a short unit-of-work transaction; protected service operations do not
 use that separate result as authorization input.
@@ -189,9 +201,10 @@ or membership. Inactive local users are rejected and onboarding cannot reactivat
 roles and organization claims do not grant local authorization. The claims and principal types do
 not perform or prove cryptographic verification by themselves. OIDC discovery, browser
 login/logout, refresh sessions, account suspension/reactivation, privileged and organization
-recovery, invitation email delivery, a general RBAC framework beyond the implemented service-level
-policies, audit event storage, rate limiting, and production secrets integration remain
-unimplemented. Deactivation does not revoke provider sessions or already issued JWTs, though
+recovery, invitation email delivery, and production secrets integration remain unimplemented.
+Audit event storage is implemented as durable database records without tamper-proof guarantees.
+Distributed production rate limiting remains unimplemented; only the documented in-process limiter
+exists. Deactivation does not revoke provider sessions or already issued JWTs, though
 subsequent protected API authentication checks local account state. Lifecycle behavior and
 remaining limitations are listed in the [Phase 2 roadmap](../architecture/phase-2-roadmap.md).
 These foundations are not a production security control set.

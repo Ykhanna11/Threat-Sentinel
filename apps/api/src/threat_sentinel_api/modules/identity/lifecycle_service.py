@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from threat_sentinel_api.modules.identity.enums import UserStatus
+from threat_sentinel_api.modules.audit.service import AuditService
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
 from threat_sentinel_api.modules.identity.schemas import AuthenticatedPrincipal
 from threat_sentinel_api.modules.identity.service import InactiveUserError
@@ -19,6 +20,7 @@ class AccountLifecycleService:
     def __init__(self, session: Session) -> None:
         self._identity_repository = IdentityRepository(session)
         self._organization_repository = OrganizationLifecycleRepository(session)
+        self._audit = AuditService(session)
 
     def deactivate(self, principal: AuthenticatedPrincipal) -> None:
         user = self._identity_repository.lock_user_for_principal_update(principal)
@@ -58,3 +60,9 @@ class AccountLifecycleService:
 
         user.status = UserStatus.DEACTIVATED
         self._identity_repository.flush()
+        self._audit.record(
+            action="account.deactivated",
+            actor_user_id=user.id,
+            target_type="user",
+            target_id=user.id,
+        )

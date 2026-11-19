@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from threat_sentinel_api.modules.audit.service import AuditService
 from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.models import User
 from threat_sentinel_api.modules.identity.schemas import AuthenticatedPrincipal
@@ -33,6 +34,7 @@ from threat_sentinel_api.modules.tenants.schemas import (
     MembershipUpdate,
     OrganizationMemberResponse,
     OrganizationUpdate,
+    SecurityAuditEventResponse,
 )
 from threat_sentinel_api.modules.tenants.service import (
     OrganizationConflict,
@@ -61,6 +63,7 @@ class OrganizationLifecycleService:
     def __init__(self, session: Session) -> None:
         self._session = session
         self._repository = OrganizationLifecycleRepository(session)
+        self._audit = AuditService(session)
 
     def list_members(
         self,
@@ -117,6 +120,13 @@ class OrganizationLifecycleService:
         if update.name is not None:
             organization.name = update.name
         self._session.flush()
+        self._audit.record(
+            action="organization.updated",
+            actor_user_id=principal.user_id,
+            organization_id=organization.id,
+            target_type="organization",
+            target_id=organization.id,
+        )
         return organization
 
     def suspend_organization(
@@ -134,6 +144,8 @@ class OrganizationLifecycleService:
         actor_membership = self._require_active_membership(memberships, principal.user_id)
         if actor_membership.role is not OrganizationRole.OWNER:
             raise OrganizationPermissionDenied("The user cannot change organization lifecycle.")
+        if organization.status is not OrganizationStatus.ACTIVE:
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
         if organization.status is OrganizationStatus.ACTIVE:
             organization.status = OrganizationStatus.SUSPENDED
             now = datetime.now(UTC)
@@ -142,6 +154,13 @@ class OrganizationLifecycleService:
                     invitation.status = InvitationStatus.REVOKED
                     invitation.revoked_at = now
             self._session.flush()
+            self._audit.record(
+                action="organization.suspended",
+                actor_user_id=principal.user_id,
+                organization_id=organization.id,
+                target_type="organization",
+                target_id=organization.id,
+            )
         return organization
 
     def reactivate_organization(
@@ -158,10 +177,79 @@ class OrganizationLifecycleService:
         actor_membership = self._require_active_membership(memberships, principal.user_id)
         if actor_membership.role is not OrganizationRole.OWNER:
             raise OrganizationPermissionDenied("The user cannot change organization lifecycle.")
-        if organization.status is OrganizationStatus.ARCHIVED:
+        if organization.status is not OrganizationStatus.SUSPENDED:
             raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
         organization.status = OrganizationStatus.ACTIVE
         self._session.flush()
+        self._audit.record(
+            action="organization.reactivated",
+            actor_user_id=principal.user_id,
+            organization_id=organization.id,
+            target_type="organization",
+            target_id=organization.id,
+        )
+        return organization
+
+    def archive_organization(
+        self,
+        principal: AuthenticatedPrincipal,
+        organization_id: UUID,
+    ) -> Organization:
+        users = self._repository.lock_principal_users_for_update(principal)
+        self._require_active_user(users[principal.user_id])
+        organization = self._repository.lock_organization_for_update(organization_id)
+        if organization is None:
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
+        invitations = self._repository.lock_invitations_for_update(organization_id)
+        memberships = self._repository.lock_memberships_for_update(organization_id)
+        actor_membership = self._require_active_membership(memberships, principal.user_id)
+        if actor_membership.role is not OrganizationRole.OWNER:
+            raise OrganizationPermissionDenied("The user cannot change organization lifecycle.")
+        if organization.status is not OrganizationStatus.ACTIVE:
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
+        if not self._repository.has_active_owner(organization_id):
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
+        now = datetime.now(UTC)
+        organization.status = OrganizationStatus.ARCHIVED
+        for invitation in invitations:
+            if invitation.status is InvitationStatus.PENDING:
+                invitation.status = InvitationStatus.REVOKED
+                invitation.revoked_at = now
+        self._session.flush()
+        self._audit.record(
+            action="organization.archived",
+            actor_user_id=principal.user_id,
+            organization_id=organization.id,
+            target_type="organization",
+            target_id=organization.id,
+        )
+        return organization
+
+    def restore_organization(
+        self,
+        principal: AuthenticatedPrincipal,
+        organization_id: UUID,
+    ) -> Organization:
+        users = self._repository.lock_principal_users_for_update(principal)
+        self._require_active_user(users[principal.user_id])
+        organization = self._repository.lock_organization_for_update(organization_id)
+        if organization is None or organization.status is not OrganizationStatus.ARCHIVED:
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
+        memberships = self._repository.lock_memberships_for_update(organization_id)
+        actor_membership = self._require_active_membership(memberships, principal.user_id)
+        if actor_membership.role is not OrganizationRole.OWNER:
+            raise OrganizationPermissionDenied("The user cannot change organization lifecycle.")
+        if not self._repository.has_active_owner(organization_id):
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
+        organization.status = OrganizationStatus.ACTIVE
+        self._session.flush()
+        self._audit.record(
+            action="organization.restored",
+            actor_user_id=principal.user_id,
+            organization_id=organization.id,
+            target_type="organization",
+            target_id=organization.id,
+        )
         return organization
 
     def update_membership(
@@ -213,6 +301,14 @@ class OrganizationLifecycleService:
         if update.status is not None:
             target.status = update.status
         self._session.flush()
+        self._audit.record(
+            action="membership.updated",
+            actor_user_id=principal.user_id,
+            organization_id=organization_id,
+            target_type="membership",
+            target_id=target.id,
+            details={"role": new_role.value, "status": new_status.value},
+        )
         return target
 
     def transfer_ownership(
@@ -254,6 +350,13 @@ class OrganizationLifecycleService:
         target_membership.role = OrganizationRole.OWNER
         owner_membership.role = OrganizationRole.ADMIN
         self._session.flush()
+        self._audit.record(
+            action="organization.ownership_transferred",
+            actor_user_id=principal.user_id,
+            organization_id=organization_id,
+            target_type="membership",
+            target_id=target_membership.id,
+        )
         return owner_membership, target_membership
 
     def authorize_invitation(
@@ -339,6 +442,14 @@ class OrganizationLifecycleService:
             expires_at=now + INVITATION_TTL,
         )
         self._repository.add_invitation(invitation)
+        self._audit.record(
+            action="invitation.created",
+            actor_user_id=principal.user_id,
+            organization_id=organization_id,
+            target_type="invitation",
+            target_id=invitation.id,
+            details={"role": details.role.value},
+        )
         return invitation, token
 
     def revoke_invitation(
@@ -364,6 +475,13 @@ class OrganizationLifecycleService:
         invitation.status = InvitationStatus.REVOKED
         invitation.revoked_at = datetime.now(UTC)
         self._session.flush()
+        self._audit.record(
+            action="invitation.revoked",
+            actor_user_id=principal.user_id,
+            organization_id=organization_id,
+            target_type="invitation",
+            target_id=invitation.id,
+        )
 
     def accept_invitation(
         self,
@@ -429,7 +547,49 @@ class OrganizationLifecycleService:
         invitation.accepted_at = now
         invitation.accepted_membership_id = membership.id
         self._session.flush()
+        self._audit.record(
+            action="invitation.accepted",
+            actor_user_id=principal.user_id,
+            organization_id=organization_id,
+            target_type="membership",
+            target_id=membership.id,
+        )
         return membership
+
+    def list_audit_events(
+        self,
+        principal: AuthenticatedPrincipal,
+        organization_id: UUID,
+        limit: int,
+    ) -> list[SecurityAuditEventResponse]:
+        users = self._repository.lock_principal_users_for_update(principal)
+        self._require_active_user(users[principal.user_id])
+        organization = self._repository.lock_organization_for_share(organization_id)
+        if organization is None:
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
+        if organization.status is not OrganizationStatus.ACTIVE:
+            raise OrganizationScopeUnavailable("The requested organization scope is unavailable.")
+        memberships = self._repository.lock_memberships_for_share(organization_id)
+        actor_membership = self._require_active_membership(memberships, principal.user_id)
+        self._require_management_role(actor_membership.role)
+        events = self._audit.list_organization_events(
+            organization_id,
+            limit=min(limit, 100),
+        )
+        return [
+            SecurityAuditEventResponse(
+                id=event.id,
+                created_at=event.created_at,
+                actor_user_id=event.actor_user_id,
+                organization_id=event.organization_id,
+                action=event.action,
+                outcome=event.outcome,
+                target_type=event.target_type,
+                target_id=event.target_id,
+                request_id=event.request_id,
+            )
+            for event in events
+        ]
 
     @staticmethod
     def _require_active_user(user: User) -> None:

@@ -191,6 +191,22 @@ class OrganizationLifecycleRepository:
             is not None
         )
 
+    def has_active_owner(self, organization_id: UUID) -> bool:
+        return (
+            self._session.scalar(
+                select(OrganizationMembership.id)
+                .join(User, User.id == OrganizationMembership.user_id)
+                .where(
+                    OrganizationMembership.organization_id == organization_id,
+                    OrganizationMembership.role == OrganizationRole.OWNER,
+                    OrganizationMembership.status == MembershipStatus.ACTIVE,
+                    User.status == UserStatus.ACTIVE,
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
     def lock_memberships_for_share(
         self,
         organization_id: UUID,

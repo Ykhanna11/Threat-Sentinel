@@ -30,6 +30,7 @@ from threat_sentinel_api.modules.identity.schemas import (
     VerifiedUserContext,
 )
 from threat_sentinel_api.modules.identity.service import IdentityService, InactiveUserError
+from threat_sentinel_api.modules.identity.profile_service import AccountProfileService
 from threat_sentinel_api.modules.scans.models import SecurityScan
 from threat_sentinel_api.modules.scans.repository import ScanRepository
 from threat_sentinel_api.modules.scans.service import ScanService
@@ -1553,3 +1554,101 @@ def test_account_deactivation_serializes_with_owner_transfer(
             transferring_owner.user_id: OrganizationRole.ADMIN,
             new_owner.user_id: OrganizationRole.OWNER,
         }
+
+
+def test_concurrent_archive_and_restore_use_organization_lifecycle_lock(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    owner = authorization_data.create_user()
+    organization_id = authorization_data.create_organization(owner)
+    barrier = Barrier(2)
+    bounded_factory = _session_factory_with_postgres_timeouts(postgres_session_factory)
+
+    def archive() -> bool:
+        barrier.wait(timeout=5)
+        try:
+            with unit_of_work(bounded_factory) as session:
+                OrganizationLifecycleService(session).archive_organization(
+                    owner.principal,
+                    organization_id,
+                )
+            return True
+        except OrganizationAccessDenied:
+            return False
+
+    def restore() -> bool:
+        barrier.wait(timeout=5)
+        try:
+            with unit_of_work(bounded_factory) as session:
+                OrganizationLifecycleService(session).restore_organization(
+                    owner.principal,
+                    organization_id,
+                )
+            return True
+        except OrganizationAccessDenied:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [
+            future.result(timeout=15)
+            for future in (
+                executor.submit(archive),
+                executor.submit(restore),
+            )
+        ]
+
+    assert sorted(results) in ([False, True], [True, True])
+    with postgres_session_factory() as session:
+        organization = session.get(Organization, organization_id)
+        assert organization is not None
+        assert organization.status in {OrganizationStatus.ACTIVE, OrganizationStatus.ARCHIVED}
+
+
+def test_account_export_serializes_with_concurrent_deactivation(
+    authorization_data: AuthorizationTestData,
+    postgres_session_factory: sessionmaker[Session],
+) -> None:
+    owner = authorization_data.create_user()
+    second_owner = authorization_data.create_user()
+    organization_id = authorization_data.create_organization(
+        owner,
+        membership_user=second_owner,
+        role=OrganizationRole.OWNER,
+    )
+    barrier = Barrier(2)
+    bounded_factory = _session_factory_with_postgres_timeouts(postgres_session_factory)
+
+    def deactivate() -> None:
+        barrier.wait(timeout=5)
+        with unit_of_work(bounded_factory) as session:
+            AccountLifecycleService(session).deactivate(owner.principal)
+
+    def export_account():
+        barrier.wait(timeout=5)
+        try:
+            with unit_of_work(bounded_factory) as session:
+                return AccountProfileService(IdentityRepository(session)).export_account(
+                    owner.principal
+                )
+        except InactiveUserError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        deactivation = executor.submit(deactivate)
+        export = executor.submit(export_account)
+        deactivation.result(timeout=15)
+        export_result = export.result(timeout=15)
+
+    if export_result is not None:
+        assert export_result.user_id == owner.user_id
+        assert export_result.status == "active"
+        assert all(
+            membership.organization_id == organization_id
+            for membership in export_result.memberships
+        )
+        assert not hasattr(export_result, "external_identity_ids")
+    with postgres_session_factory() as session:
+        account = session.get(User, owner.user_id)
+        assert account is not None
+        assert account.status is UserStatus.DEACTIVATED

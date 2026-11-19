@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
 
@@ -15,7 +16,11 @@ from threat_sentinel_api.api.v1.routes import account as account_routes
 from threat_sentinel_api.db import session as database_session
 from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
-from threat_sentinel_api.modules.identity.schemas import VerifiedAccessTokenClaims
+from threat_sentinel_api.modules.audit.models import SecurityAuditEvent
+from threat_sentinel_api.modules.identity.schemas import (
+    AuthenticatedPrincipal,
+    VerifiedAccessTokenClaims,
+)
 from threat_sentinel_api.modules.tenants.enums import MembershipStatus, OrganizationRole
 from threat_sentinel_api.modules.tenants.models import Organization, OrganizationMembership
 
@@ -216,6 +221,14 @@ def test_deactivation_requires_explicit_confirmation_and_preserves_account_histo
     assert request_schema["$ref"].endswith("/AccountDeactivationRequest")
     assert "204" in operation["responses"]
 
+    with factory() as session:
+        event = session.scalar(
+            select(SecurityAuditEvent).where(SecurityAuditEvent.action == "account.deactivated")
+        )
+        assert event is not None
+        assert event.actor_user_id == user.id
+        assert event.request_id
+
 
 def test_deactivation_preserves_active_member_membership(
     client: TestClient,
@@ -375,3 +388,201 @@ def test_deactivation_requires_another_active_user_owner_and_preserves_membershi
         assert owner is not None and owner.status is expected_owner_status
         assert len(memberships) == 2
         assert all(membership.status is MembershipStatus.ACTIVE for membership in memberships)
+
+
+def test_account_export_is_self_scoped_and_does_not_return_secrets(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _configure(client, engine, monkeypatch, "export-owner")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    with factory() as session, session.begin():
+        user = session.scalar(
+            select(User).join(ExternalIdentity).where(ExternalIdentity.subject == "export-owner")
+        )
+        assert user is not None
+        organization = Organization(
+            name="Export organization",
+            slug="export-organization",
+            created_by_user_id=user.id,
+        )
+        session.add(organization)
+        session.flush()
+        session.add(
+            OrganizationMembership(
+                organization_id=organization.id,
+                user_id=user.id,
+                role=OrganizationRole.OWNER,
+                status=MembershipStatus.ACTIVE,
+            )
+        )
+
+    response = client.get("/api/v1/account/export")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "active"
+    assert len(payload["memberships"]) == 1
+    assert "token" not in payload
+    assert "email" not in payload
+    assert "external_identity_ids" not in payload
+    assert "password" not in payload
+    assert "credential" not in payload
+    assert "invitation" not in payload
+
+
+def test_account_export_rejects_cross_user_principal_and_concurrent_deactivation(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _configure(client, engine, monkeypatch, "export-user-a")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    with factory() as session, session.begin():
+        first = session.scalar(
+            select(User).join(ExternalIdentity).where(ExternalIdentity.subject == "export-user-a")
+        )
+        assert first is not None
+        first.status = UserStatus.DEACTIVATED
+
+    response = client.get("/api/v1/account/export")
+    assert response.status_code == 401
+    with factory() as session:
+        user = session.scalar(
+            select(User).join(ExternalIdentity).where(ExternalIdentity.subject == "export-user-a")
+        )
+        assert user is not None
+        event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.action == "account.export_denied",
+                SecurityAuditEvent.actor_user_id == user.id,
+            )
+        )
+        assert event is not None
+        assert event.outcome == "failure"
+        assert event.details == {"reason": "inactive_account"}
+
+
+def test_account_export_failure_records_safe_event_for_verified_principal(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _configure(client, engine, monkeypatch, "export-failure-user")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    with factory() as session:
+        identity = session.scalar(
+            select(ExternalIdentity).where(ExternalIdentity.subject == "export-failure-user")
+        )
+        assert identity is not None
+        principal = AuthenticatedPrincipal(
+            user_id=identity.user_id,
+            external_identity_id=identity.id,
+            issuer=identity.issuer,
+            subject=identity.subject,
+            email=identity.email,
+            email_verified=identity.email_verified_at is not None,
+        )
+        user = session.get(User, identity.user_id)
+        assert user is not None
+        user.status = UserStatus.DEACTIVATED
+        session.commit()
+
+    client.app.dependency_overrides[auth_dependencies.get_current_principal] = lambda: principal
+    original_unit_of_work = account_routes.unit_of_work
+    transaction_events: list[str] = []
+
+    @contextmanager
+    def instrumented_unit_of_work() -> Iterator[Session]:
+        uow_number = len(transaction_events) // 2 + 1
+        transaction_events.append(f"uow{uow_number}:enter")
+        try:
+            with original_unit_of_work() as session:
+                yield session
+        except BaseException:
+            transaction_events.append(f"uow{uow_number}:rollback")
+            raise
+        else:
+            transaction_events.append(f"uow{uow_number}:commit")
+
+    monkeypatch.setattr(account_routes, "unit_of_work", instrumented_unit_of_work)
+    response = client.get("/api/v1/account/export")
+
+    assert response.status_code == 401
+    assert transaction_events == [
+        "uow1:enter",
+        "uow1:rollback",
+        "uow2:enter",
+        "uow2:commit",
+    ]
+    with factory() as session:
+        event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.action == "account.export_denied",
+                SecurityAuditEvent.actor_user_id == principal.user_id,
+            )
+        )
+        assert event is not None
+        assert event.outcome == "failure"
+        assert event.organization_id is None
+        assert event.target_type == "user"
+        assert event.target_id == principal.user_id
+        assert event.details == {"reason": "inactive_account"}
+        serialized = repr(event.details).lower()
+        assert all(
+            secret not in serialized
+            for secret in ("password", "token", "credential", "invitation", "email")
+        )
+
+
+def test_account_export_excludes_cross_user_and_cross_tenant_memberships(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _configure(client, engine, monkeypatch, "export-owner-isolated")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    with factory() as session, session.begin():
+        owner = session.scalar(
+            select(User)
+            .join(ExternalIdentity)
+            .where(ExternalIdentity.subject == "export-owner-isolated")
+        )
+        other = User()
+        session.add(other)
+        session.flush()
+        own_org = Organization(
+            name="Own tenant",
+            slug="own-export-tenant",
+            created_by_user_id=owner.id,
+        )
+        other_org = Organization(
+            name="Other tenant",
+            slug="other-export-tenant",
+            created_by_user_id=other.id,
+        )
+        session.add_all([own_org, other_org])
+        session.flush()
+        session.add_all(
+            [
+                OrganizationMembership(
+                    organization_id=own_org.id,
+                    user_id=owner.id,
+                    role=OrganizationRole.OWNER,
+                    status=MembershipStatus.ACTIVE,
+                ),
+                OrganizationMembership(
+                    organization_id=other_org.id,
+                    user_id=other.id,
+                    role=OrganizationRole.OWNER,
+                    status=MembershipStatus.ACTIVE,
+                ),
+            ]
+        )
+
+    response = client.get("/api/v1/account/export")
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["memberships"]) == 1
+    assert payload["memberships"][0]["organization_id"] != str(other_org.id)

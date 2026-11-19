@@ -139,3 +139,23 @@ class AccountProfileResponse(BaseModel):
 
     display_name: str | None
     created_at: datetime
+
+
+class AccountExportMembership(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    organization_id: UUID
+    membership_id: UUID
+    role: str
+    status: str
+    created_at: datetime
+
+
+class AccountExportResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: UUID
+    status: str
+    display_name: str | None
+    created_at: datetime
+    memberships: tuple[AccountExportMembership, ...]

@@ -41,6 +41,8 @@ def test_valid_authentication_configuration_is_preserved() -> None:
     assert settings.auth_clock_skew_seconds == 30
     assert settings.auth_jwks_cache_ttl_seconds == 300
     assert settings.auth_jwks_cache_max_entries == 16
+    assert settings.sensitive_rate_limit_requests == 30
+    assert settings.sensitive_rate_limit_window_seconds == 60
 
 
 def test_authentication_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:

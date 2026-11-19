@@ -24,10 +24,11 @@ an existing active user with a verified identity; invitations to unregistered us
 Authenticated account-profile, organization, membership, and invitation API routes exist. A
 confirmed self-deactivation marks only the local account inactive; it preserves the User,
 ExternalIdentity, organization memberships, role assignments, and historical records. It is
-rejected if any organization would lose its last active OWNER. This is not account deletion or
-export, and it does not revoke a provider session or already issued JWT; protected API requests
+rejected if any organization would lose its last active OWNER. This is not account deletion. `GET /account/export` provides a self-scoped export of account
+and organization memberships; it excludes external identity metadata, credentials, bearer or
+refresh tokens, and invitation secrets. Self-deactivation does not revoke a provider session or already issued JWT; protected API requests
 check the local status after commit. There is no user-suspension control plane, reactivation,
-privileged or organization recovery, durable lifecycle audit store, invitation email delivery,
+privileged or organization recovery, invitation email delivery,
 analysis endpoint, cloud inference integration, analytics pipeline, or production data store.
 Suspended organizations retain memberships and historical records; pending invitations are revoked
 and are not restored on reactivation. Retention and deletion controls remain a pre-production

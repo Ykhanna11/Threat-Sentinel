@@ -150,3 +150,17 @@ class MembershipAcceptanceResponse(BaseModel):
     organization_id: UUID
     role: OrganizationRole
     status: MembershipStatus
+
+
+class SecurityAuditEventResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: UUID
+    created_at: datetime
+    actor_user_id: UUID | None
+    organization_id: UUID | None
+    action: str
+    outcome: str
+    target_type: str | None
+    target_id: UUID | None
+    request_id: str | None

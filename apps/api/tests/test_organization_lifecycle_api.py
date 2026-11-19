@@ -37,6 +37,7 @@ from threat_sentinel_api.modules.tenants.models import (
 from threat_sentinel_api.modules.tenants.lifecycle_repository import (
     OrganizationLifecycleRepository,
 )
+from threat_sentinel_api.modules.audit.models import SecurityAuditEvent
 from threat_sentinel_api.modules.tenants.lifecycle_service import OrganizationLifecycleService
 from threat_sentinel_api.modules.tenants.repository import OrganizationRepository
 from threat_sentinel_api.modules.tenants.schemas import MembershipUpdate, OrganizationCreate
@@ -153,6 +154,16 @@ def test_organization_creation_assigns_owner_atomically_and_hides_other_tenants(
         assert memberships[0].user_id == organization.created_by_user_id
         assert memberships[0].role is OrganizationRole.OWNER
         assert memberships[0].status is MembershipStatus.ACTIVE
+        creation_event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == organization_id,
+                SecurityAuditEvent.action == "organization.created",
+            )
+        )
+        assert creation_event is not None
+        assert creation_event.actor_user_id == organization.created_by_user_id
+        assert creation_event.outcome == "success"
+        assert creation_event.details is None
 
     duplicate = client.post(
         "/api/v1/organizations",
@@ -186,6 +197,39 @@ def test_organization_creation_assigns_owner_atomically_and_hides_other_tenants(
     )
     with factory() as session:
         assert session.scalar(select(func.count()).select_from(Organization)) == 2
+        outsider_id = _user_id_for_subject(factory, "organization-outsider")
+        denial_events = session.scalars(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.actor_user_id == outsider_id,
+                SecurityAuditEvent.action.in_(
+                    {"membership.list_denied", "organization.update_denied"}
+                ),
+            )
+        ).all()
+        assert {event.action for event in denial_events} == {
+            "membership.list_denied",
+            "organization.update_denied",
+        }
+        assert all(
+            event.organization_id is None
+            and event.outcome == "failure"
+            and event.details == {"reason": "scope_unavailable"}
+            for event in denial_events
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(SecurityAuditEvent)
+                .where(
+                    SecurityAuditEvent.organization_id == organization_id,
+                    SecurityAuditEvent.actor_user_id == outsider_id,
+                    SecurityAuditEvent.action.in_(
+                        {"membership.list_denied", "organization.update_denied"}
+                    ),
+                )
+            )
+            == 0
+        )
 
 
 def test_invitation_is_hashed_single_use_and_bound_to_the_exact_verified_identity(
@@ -226,6 +270,19 @@ def test_invitation_is_hashed_single_use_and_bound_to_the_exact_verified_identit
     _select_identity(provider, "different-user", "person@example.test")
     rejected = client.post("/api/v1/organization-invitations/accept", json={"token": token})
     assert rejected.status_code == 404
+    rejected_user_id = _user_id_for_subject(factory, "different-user")
+    with factory() as session:
+        rejected_event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.actor_user_id == rejected_user_id,
+                SecurityAuditEvent.action == "invitation.accept_denied",
+            )
+        )
+        assert rejected_event is not None
+        assert rejected_event.outcome == "failure"
+        assert rejected_event.organization_id is None
+        assert rejected_event.details == {"reason": "invitation_unavailable"}
+        assert token not in repr(rejected_event.details)
     with factory() as session:
         assert (
             session.scalar(
@@ -337,6 +394,27 @@ def test_unauthorized_members_cannot_enumerate_invitation_recipients(
         }
 
     assert lookup_emails == []
+    with factory() as session:
+        denial_events = session.scalars(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == organization_id,
+                SecurityAuditEvent.action == "invitation.create_denied",
+            )
+        ).all()
+        assert len(denial_events) == 4
+        assert {event.actor_user_id for event in denial_events} == {
+            viewer_user_id,
+            member_user_id,
+        }
+        assert all(
+            event.outcome == "failure" and event.details == {"reason": "insufficient_role"}
+            for event in denial_events
+        )
+        assert all(
+            secret not in repr(event.details).lower()
+            for event in denial_events
+            for secret in ("email", "token", "password", "credential")
+        )
 
 
 def test_invitation_scope_and_inactive_user_are_checked_before_recipient_lookup(
@@ -511,7 +589,7 @@ def test_invitation_fails_if_admin_is_demoted_after_preflight(
     )
 
     assert demotion_committed
-    assert unit_of_work_calls == 2
+    assert unit_of_work_calls == 3
     assert response.status_code == 404
     assert response.json() == {
         "error": {
@@ -542,6 +620,16 @@ def test_invitation_fails_if_admin_is_demoted_after_preflight(
             )
             is OrganizationRole.MEMBER
         )
+        denial_event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == organization_id,
+                SecurityAuditEvent.action == "invitation.create_denied",
+            )
+        )
+        assert denial_event is not None
+        assert denial_event.actor_user_id == admin_user_id
+        assert denial_event.outcome == "failure"
+        assert denial_event.details == {"reason": "insufficient_role"}
 
 
 def test_role_checks_ownership_transfer_and_owner_lifecycle(
@@ -841,3 +929,599 @@ def test_failed_initial_membership_insert_rolls_back_organization(
     with sessionmaker(bind=engine)() as session:
         assert session.scalar(select(func.count()).select_from(Organization)) == 0
         assert session.scalar(select(func.count()).select_from(OrganizationMembership)) == 0
+
+
+def test_organization_creation_audit_failure_rolls_back_creation(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure(client, engine, monkeypatch)
+
+    def fail_audit_record(
+        _audit_service: object,
+        **_: object,
+    ) -> SecurityAuditEvent:
+        raise RuntimeError("forced audit persistence failure")
+
+    monkeypatch.setattr(
+        "threat_sentinel_api.modules.audit.service.AuditService.record",
+        fail_audit_record,
+    )
+    with TestClient(api_main.app, raise_server_exceptions=False) as failure_client:
+        failure_client.headers["Authorization"] = "Bearer test-token"
+        response = failure_client.post(
+            "/api/v1/organizations",
+            json={"name": "Audit rollback", "slug": "audit-rollback"},
+        )
+
+    assert response.status_code == 500
+    with sessionmaker(bind=engine)() as session:
+        assert session.scalar(select(func.count()).select_from(Organization)) == 0
+        assert session.scalar(select(func.count()).select_from(OrganizationMembership)) == 0
+        assert session.scalar(select(func.count()).select_from(SecurityAuditEvent)) == 0
+
+
+def test_organization_archive_restore_and_tenant_audit_events(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory = _configure(client, engine, monkeypatch)
+    create = client.post(
+        "/api/v1/organizations",
+        json={"name": "Audit organization", "slug": "audit-organization"},
+    )
+    assert create.status_code == 201
+    organization_id = create.json()["id"]
+
+    archived = client.post(f"/api/v1/organizations/{organization_id}/archive")
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+
+    restored = client.post(f"/api/v1/organizations/{organization_id}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "active"
+
+    events = client.get(
+        f"/api/v1/organizations/{organization_id}/audit-events",
+        params={"limit": 10},
+    )
+    assert events.status_code == 200
+    actions = {event["action"] for event in events.json()}
+    assert "organization.archived" in actions
+    assert "organization.restored" in actions
+    assert "organization.audit_events_read" not in actions
+    assert all(event["request_id"] for event in events.json())
+    with factory() as session:
+        read_event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == UUID(organization_id),
+                SecurityAuditEvent.action == "organization.audit_events_read",
+            )
+        )
+        assert read_event is not None
+        assert read_event.actor_user_id == _user_id_for_subject(factory, "organization-owner")
+        assert read_event.outcome == "success"
+        assert read_event.details is None
+
+
+def test_audit_actor_comes_from_verified_principal_not_request_fields(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={
+            "name": "Actor audit",
+            "slug": "actor-audit",
+            "actor_user_id": "00000000-0000-0000-0000-000000000001",
+        },
+    )
+    assert organization.status_code == 422
+
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Actor audit", "slug": "actor-audit"},
+    )
+    assert organization.status_code == 201
+    organization_id = UUID(organization.json()["id"])
+
+    owner_id = _user_id_for_subject(factory, "organization-owner")
+    archive = client.post(
+        f"/api/v1/organizations/{organization_id}/archive",
+        headers={"X-Actor-User-ID": "00000000-0000-0000-0000-000000000001"},
+    )
+    assert archive.status_code == 200
+
+    with factory() as session:
+        event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == organization_id,
+                SecurityAuditEvent.action == "organization.archived",
+            )
+        )
+        assert event is not None
+        assert event.actor_user_id == owner_id
+        assert event.details is None
+
+
+def test_membership_audit_actor_and_details_exclude_secrets(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Membership audit", "slug": "membership-audit"},
+    )
+    assert organization.status_code == 201
+    organization_id = UUID(organization.json()["id"])
+
+    _select_identity(provider, "membership-audit-user", "membership-audit@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    member_id = _user_id_for_subject(factory, "membership-audit-user")
+    with factory() as session, session.begin():
+        membership = OrganizationMembership(
+            organization_id=organization_id,
+            user_id=member_id,
+            role=OrganizationRole.MEMBER,
+            status=MembershipStatus.ACTIVE,
+        )
+        session.add(membership)
+        session.flush()
+        membership_id = membership.id
+
+    _select_identity(provider, "organization-owner")
+    response = client.patch(
+        f"/api/v1/organizations/{organization_id}/members/{membership_id}",
+        json={"role": "viewer"},
+    )
+    assert response.status_code == 200
+
+    with factory() as session:
+        event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == organization_id,
+                SecurityAuditEvent.action == "membership.updated",
+            )
+        )
+        assert event is not None
+        assert event.actor_user_id == _user_id_for_subject(factory, "organization-owner")
+        assert event.details == {"role": "viewer", "status": "active"}
+        serialized = repr(event.details).lower()
+        assert "token" not in serialized
+        assert "password" not in serialized
+        assert "credential" not in serialized
+        assert "invitation" not in serialized
+
+
+def test_membership_permission_denial_records_authenticated_actor(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Membership denial", "slug": "membership-denial"},
+    )
+    assert organization.status_code == 201
+    organization_id = UUID(organization.json()["id"])
+
+    _select_identity(provider, "denied-membership-user", "denied-membership@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    member_id = _user_id_for_subject(factory, "denied-membership-user")
+    with factory() as session, session.begin():
+        target = OrganizationMembership(
+            organization_id=organization_id,
+            user_id=member_id,
+            role=OrganizationRole.MEMBER,
+            status=MembershipStatus.ACTIVE,
+        )
+        session.add(target)
+        session.flush()
+        target_id = target.id
+
+    response = client.patch(
+        f"/api/v1/organizations/{organization_id}/members/{target_id}",
+        json={"status": "suspended"},
+    )
+
+    assert response.status_code == 403
+    with factory() as session:
+        event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == organization_id,
+                SecurityAuditEvent.action == "membership.update_denied",
+            )
+        )
+        assert event is not None
+        assert event.actor_user_id == member_id
+        assert event.outcome == "failure"
+        assert event.details == {"reason": "insufficient_role"}
+        persisted = session.get(OrganizationMembership, target_id)
+        assert persisted is not None
+        assert persisted.status is MembershipStatus.ACTIVE
+
+
+def test_denied_archive_records_safe_failure_actor(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Denied archive audit", "slug": "denied-archive-audit"},
+    )
+    assert organization.status_code == 201
+    organization_id = UUID(organization.json()["id"])
+
+    _select_identity(provider, "archive-denied-member", "archive-denied@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    member_id = _user_id_for_subject(factory, "archive-denied-member")
+    with factory() as session, session.begin():
+        session.add(
+            OrganizationMembership(
+                organization_id=organization_id,
+                user_id=member_id,
+                role=OrganizationRole.MEMBER,
+                status=MembershipStatus.ACTIVE,
+            )
+        )
+
+    response = client.post(f"/api/v1/organizations/{organization_id}/archive")
+    assert response.status_code == 403
+    with factory() as session:
+        event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == organization_id,
+                SecurityAuditEvent.action == "organization.archive_denied",
+            )
+        )
+        assert event is not None
+        assert event.actor_user_id == member_id
+        assert event.outcome == "failure"
+        assert event.details == {"reason": "insufficient_role"}
+
+
+def test_denied_archive_rolls_back_mutation_uow_before_separate_failure_audit(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Denied archive ordering", "slug": "denied-archive-ordering"},
+    )
+    assert organization.status_code == 201
+    organization_id = UUID(organization.json()["id"])
+
+    _select_identity(provider, "archive-order-member", "archive-order@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    member_id = _user_id_for_subject(factory, "archive-order-member")
+    with factory() as session, session.begin():
+        session.add(
+            OrganizationMembership(
+                organization_id=organization_id,
+                user_id=member_id,
+                role=OrganizationRole.MEMBER,
+                status=MembershipStatus.ACTIVE,
+            )
+        )
+
+    original_unit_of_work = organization_routes.unit_of_work
+    transaction_events: list[str] = []
+
+    @contextmanager
+    def instrumented_unit_of_work() -> Iterator[Session]:
+        uow_number = len(transaction_events) // 2 + 1
+        transaction_events.append(f"uow{uow_number}:enter")
+        try:
+            with original_unit_of_work() as session:
+                yield session
+        except BaseException:
+            transaction_events.append(f"uow{uow_number}:rollback")
+            raise
+        else:
+            transaction_events.append(f"uow{uow_number}:commit")
+
+    monkeypatch.setattr(organization_routes, "unit_of_work", instrumented_unit_of_work)
+
+    response = client.post(f"/api/v1/organizations/{organization_id}/archive")
+
+    assert response.status_code == 403
+    assert transaction_events == [
+        "uow1:enter",
+        "uow1:rollback",
+        "uow2:enter",
+        "uow2:commit",
+    ]
+    with factory() as session:
+        persisted = session.get(Organization, organization_id)
+        assert persisted is not None
+        assert persisted.status is OrganizationStatus.ACTIVE
+        event = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == organization_id,
+                SecurityAuditEvent.action == "organization.archive_denied",
+            )
+        )
+        assert event is not None
+        assert event.actor_user_id == member_id
+        assert event.outcome == "failure"
+        assert event.details == {"reason": "insufficient_role"}
+
+
+def test_denied_archive_audit_persistence_failure_keeps_mutation_denied(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Denied archive audit failure", "slug": "denied-archive-audit-failure"},
+    )
+    assert organization.status_code == 201
+    organization_id = UUID(organization.json()["id"])
+
+    _select_identity(provider, "archive-failure-member", "archive-failure@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    member_id = _user_id_for_subject(factory, "archive-failure-member")
+    with factory() as session, session.begin():
+        session.add(
+            OrganizationMembership(
+                organization_id=organization_id,
+                user_id=member_id,
+                role=OrganizationRole.MEMBER,
+                status=MembershipStatus.ACTIVE,
+            )
+        )
+
+    original_unit_of_work = organization_routes.unit_of_work
+    transaction_events: list[str] = []
+
+    @contextmanager
+    def instrumented_unit_of_work() -> Iterator[Session]:
+        uow_number = len(transaction_events) // 2 + 1
+        transaction_events.append(f"uow{uow_number}:enter")
+        try:
+            with original_unit_of_work() as session:
+                yield session
+        except BaseException:
+            transaction_events.append(f"uow{uow_number}:rollback")
+            raise
+        else:
+            transaction_events.append(f"uow{uow_number}:commit")
+
+    def fail_audit_persistence(
+        _audit_service: object,
+        *,
+        actor_user_id: UUID | None = None,
+        **_: object,
+    ) -> SecurityAuditEvent:
+        raise RuntimeError("forced audit persistence failure")
+
+    monkeypatch.setattr(organization_routes, "unit_of_work", instrumented_unit_of_work)
+    monkeypatch.setattr(
+        "threat_sentinel_api.modules.audit.service.AuditService.record",
+        fail_audit_persistence,
+    )
+    with TestClient(api_main.app, raise_server_exceptions=False) as failure_client:
+        failure_client.headers["Authorization"] = "Bearer test-token"
+        response = failure_client.post(f"/api/v1/organizations/{organization_id}/archive")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "code": "internal_server_error",
+            "message": "An unexpected error occurred.",
+        }
+    }
+    assert transaction_events == [
+        "uow1:enter",
+        "uow1:rollback",
+        "uow2:enter",
+        "uow2:rollback",
+    ]
+    with factory() as session:
+        persisted = session.get(Organization, organization_id)
+        assert persisted is not None
+        assert persisted.status is OrganizationStatus.ACTIVE
+        events = session.scalars(
+            select(SecurityAuditEvent).where(SecurityAuditEvent.organization_id == organization_id)
+        ).all()
+        assert not any(
+            event.action == "organization.archived" and event.outcome == "success"
+            for event in events
+        )
+        assert not any(
+            event.action in {"organization.archived", "organization.archive_denied"}
+            for event in events
+        )
+
+
+def test_audit_access_roles_and_archived_and_suspended_organizations(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Audit access", "slug": "audit-access"},
+    )
+    assert organization.status_code == 201
+    organization_id = UUID(organization.json()["id"])
+
+    owner_events = client.get(f"/api/v1/organizations/{organization_id}/audit-events")
+    assert owner_events.status_code == 200
+
+    _select_identity(provider, "audit-admin", "audit-admin@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    admin_id = _user_id_for_subject(factory, "audit-admin")
+    with factory() as session, session.begin():
+        session.add(
+            OrganizationMembership(
+                organization_id=organization_id,
+                user_id=admin_id,
+                role=OrganizationRole.ADMIN,
+                status=MembershipStatus.ACTIVE,
+            )
+        )
+
+    assert client.get(f"/api/v1/organizations/{organization_id}/audit-events").status_code == 200
+
+    for subject, role in (
+        ("audit-member", OrganizationRole.MEMBER),
+        ("audit-viewer", OrganizationRole.VIEWER),
+    ):
+        _select_identity(provider, subject, f"{subject}@example.test")
+        assert client.get("/api/v1/account/profile").status_code == 200
+        user_id = _user_id_for_subject(factory, subject)
+        with factory() as session, session.begin():
+            session.add(
+                OrganizationMembership(
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    role=role,
+                    status=MembershipStatus.ACTIVE,
+                )
+            )
+        assert (
+            client.get(f"/api/v1/organizations/{organization_id}/audit-events").status_code == 403
+        )
+
+    _select_identity(provider, "organization-owner")
+    assert client.post(f"/api/v1/organizations/{organization_id}/suspend").status_code == 200
+    assert client.get(f"/api/v1/organizations/{organization_id}/audit-events").status_code == 404
+
+
+def test_audit_access_denies_cross_organization_and_inactive_user(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    first = client.post(
+        "/api/v1/organizations",
+        json={"name": "Cross audit first", "slug": "cross-audit-first"},
+    )
+    assert first.status_code == 201
+    first_id = UUID(first.json()["id"])
+
+    _select_identity(provider, "cross-audit-owner-b", "cross-audit-b@example.test")
+    assert client.get("/api/v1/account/profile").status_code == 200
+    second = client.post(
+        "/api/v1/organizations",
+        json={"name": "Cross audit second", "slug": "cross-audit-second"},
+    )
+    assert second.status_code == 201
+    second_id = UUID(second.json()["id"])
+
+    assert client.get(f"/api/v1/organizations/{first_id}/audit-events").status_code == 404
+    second_events = client.get(f"/api/v1/organizations/{second_id}/audit-events")
+    assert second_events.status_code == 200
+    with factory() as session:
+        denied_read = session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id.is_(None),
+                SecurityAuditEvent.actor_user_id
+                == _user_id_for_subject(factory, "cross-audit-owner-b"),
+                SecurityAuditEvent.action == "organization.audit_events_read_denied",
+            )
+        )
+        assert denied_read is not None
+        assert denied_read.outcome == "failure"
+        assert denied_read.details == {"reason": "scope_unavailable"}
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(SecurityAuditEvent)
+                .where(
+                    SecurityAuditEvent.organization_id == first_id,
+                    SecurityAuditEvent.action == "organization.audit_events_read_denied",
+                )
+            )
+            == 0
+        )
+    assert all(
+        event["action"] != "organization.audit_events_read_denied" for event in second_events.json()
+    )
+    _select_identity(provider, "organization-owner")
+    first_events = client.get(f"/api/v1/organizations/{first_id}/audit-events")
+    assert first_events.status_code == 200
+    assert all(
+        event["action"] != "organization.audit_events_read_denied" for event in first_events.json()
+    )
+    _select_identity(provider, "cross-audit-owner-b")
+
+    with factory() as session, session.begin():
+        owner = session.scalar(
+            select(User)
+            .join(ExternalIdentity)
+            .where(ExternalIdentity.subject == "cross-audit-owner-b")
+        )
+        assert owner is not None
+        owner.status = UserStatus.SUSPENDED
+    assert client.get(f"/api/v1/organizations/{second_id}/audit-events").status_code == 401
+
+
+def test_archived_organizations_reject_mutations_and_restore_only_from_archive(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, factory = _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Archived operations", "slug": "archived-operations"},
+    )
+    assert organization.status_code == 201
+    organization_id = UUID(organization.json()["id"])
+
+    assert client.post(f"/api/v1/organizations/{organization_id}/archive").status_code == 200
+    assert client.post(f"/api/v1/organizations/{organization_id}/suspend").status_code == 404
+    assert (
+        client.patch(
+            f"/api/v1/organizations/{organization_id}",
+            json={"name": "Prohibited update"},
+        ).status_code
+        == 404
+    )
+    assert client.get(f"/api/v1/organizations/{organization_id}/members").status_code == 404
+    assert client.post(f"/api/v1/organizations/{organization_id}/reactivate").status_code == 404
+
+    assert client.post(f"/api/v1/organizations/{organization_id}/restore").status_code == 200
+    assert client.post(f"/api/v1/organizations/{organization_id}/archive").status_code == 200
+    assert client.get(f"/api/v1/organizations/{organization_id}/audit-events").status_code == 404
+
+
+def test_restore_rejects_suspended_and_repeated_invalid_transitions(
+    client: TestClient,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure(client, engine, monkeypatch)
+    organization = client.post(
+        "/api/v1/organizations",
+        json={"name": "Invalid lifecycle", "slug": "invalid-lifecycle"},
+    )
+    assert organization.status_code == 201
+    organization_id = UUID(organization.json()["id"])
+
+    assert client.post(f"/api/v1/organizations/{organization_id}/suspend").status_code == 200
+    assert client.post(f"/api/v1/organizations/{organization_id}/restore").status_code == 404
+    assert client.post(f"/api/v1/organizations/{organization_id}/archive").status_code == 404
+
+    assert client.post(f"/api/v1/organizations/{organization_id}/reactivate").status_code == 200
+    assert client.post(f"/api/v1/organizations/{organization_id}/archive").status_code == 200
+    assert client.post(f"/api/v1/organizations/{organization_id}/archive").status_code == 404
+    assert client.post(f"/api/v1/organizations/{organization_id}/restore").status_code == 200
+    assert client.post(f"/api/v1/organizations/{organization_id}/restore").status_code == 404

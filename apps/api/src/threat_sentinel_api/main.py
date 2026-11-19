@@ -11,6 +11,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from threat_sentinel_api.api.v1.router import api_router
 from threat_sentinel_api.core.config import get_settings
 from threat_sentinel_api.core.logging import configure_logging, get_logger
+from threat_sentinel_api.core.rate_limit import InProcessSensitiveEndpointRateLimiter
+from threat_sentinel_api.modules.audit.context import request_id_context
 from threat_sentinel_api.modules.identity.lifecycle_service import AccountLifecycleConflict
 from threat_sentinel_api.modules.identity.service import InvalidPrincipalError
 from threat_sentinel_api.modules.scans.service import ScanNotFound
@@ -27,6 +29,10 @@ from threat_sentinel_api.modules.tenants.lifecycle_service import (
 
 logger = get_logger(__name__)
 settings = get_settings()
+_sensitive_rate_limiter = InProcessSensitiveEndpointRateLimiter(
+    settings.sensitive_rate_limit_requests,
+    settings.sensitive_rate_limit_window_seconds,
+)
 
 
 @asynccontextmanager
@@ -57,10 +63,31 @@ if settings.cors_origins:
 
 
 @app.middleware("http")
+async def sensitive_endpoint_rate_limit(request: Request, call_next):
+    limited = _sensitive_rate_limiter.check(request)
+    if limited is not None:
+        return limited
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def log_request(request: Request, call_next):
-    request_id = str(uuid4())
+    supplied_request_id = request.headers.get("X-Request-ID")
+    if (
+        supplied_request_id is not None
+        and 1 <= len(supplied_request_id) <= 36
+        and supplied_request_id.isascii()
+        and all(character.isalnum() or character in "-_" for character in supplied_request_id)
+    ):
+        request_id = supplied_request_id
+    else:
+        request_id = str(uuid4())
     request.state.request_id = request_id
-    response = await call_next(request)
+    token = request_id_context.set(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_context.reset(token)
     response.headers["X-Request-ID"] = request_id
     logger.info(
         "http_request_completed",

@@ -16,10 +16,17 @@ state transitions, owner consequences, and recovery decision for this phase.
 - The operation preserves identity and membership history. Under the existing User → Organization
   → Membership lock order it rejects deactivation when any organization would have no other active
   OWNER backed by an active User. No owner role is transferred.
-- There is no provider administrative integration, platform control plane, organization owner
-  recovery authority, or durable audit-event store. Suspension, reactivation, privileged recovery,
-  and organization access restoration remain deferred. Application request logs are not an audit
-  trail.
+- Historical note (superseded): the initial design record for this decision originally stated that
+  there was no durable audit-event store. That statement is superseded by the current database-
+  backed security audit implementation in
+  `threat_sentinel_api.modules.audit.service.AuditService`, its `SecurityAuditEvent` model, and
+  the versioned organization audit-events API. Supported lifecycle transitions and lifecycle denial
+  events are now persisted with actor attribution and structured bounded details. This does not
+  make the audit log tamper-proof or implement retention enforcement.
+- There is no provider administrative integration, platform control plane, or organization owner
+  recovery authority. Suspension, reactivation, privileged recovery, and organization access
+  restoration remain deferred. Application request logs are not a replacement for the durable audit
+  event store.
 - Deactivation does not revoke external identity-provider sessions or already issued JWTs. The
   local active-user check denies subsequent protected API requests after commit; in-flight work is
   not retroactively cancelled.

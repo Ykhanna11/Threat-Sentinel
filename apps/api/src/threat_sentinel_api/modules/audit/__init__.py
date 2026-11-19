@@ -1,1 +1,1 @@
-"""Audit module placeholder; no audit event store is implemented."""
+"""Database-backed security audit event module."""

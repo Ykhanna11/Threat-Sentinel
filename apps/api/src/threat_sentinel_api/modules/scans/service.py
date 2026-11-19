@@ -3,6 +3,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from threat_sentinel_api.db.session import SessionFactory, unit_of_work
+from threat_sentinel_api.modules.audit.recording import record_failure_event
 from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
 from threat_sentinel_api.modules.identity.schemas import AuthenticatedPrincipal
@@ -15,6 +16,7 @@ from threat_sentinel_api.modules.tenants.authorization import (
 )
 from threat_sentinel_api.modules.tenants.repository import OrganizationRepository
 from threat_sentinel_api.modules.tenants.service import (
+    OrganizationAccessDenied,
     OrganizationPermissionDenied,
     OrganizationService,
 )
@@ -62,33 +64,51 @@ class ScanService:
         principal: AuthenticatedPrincipal,
         organization_id: UUID,
     ) -> SecurityScan:
-        with unit_of_work(self._session_factory) as session:
-            self._require_organization_action(
-                session,
+        try:
+            with unit_of_work(self._session_factory) as session:
+                self._require_organization_action(
+                    session,
+                    principal,
+                    organization_id,
+                    OrganizationScanAction.CREATE,
+                )
+                scan = SecurityScan(
+                    organization_id=organization_id,
+                    created_by_user_id=principal.user_id,
+                )
+                ScanRepository(session).add(scan)
+                return scan
+        except (InactiveUserError, OrganizationAccessDenied) as error:
+            self._record_organization_denial(
                 principal,
                 organization_id,
-                OrganizationScanAction.CREATE,
+                "organization.scan.create_denied",
+                self._organization_denial_reason(error),
             )
-            scan = SecurityScan(
-                organization_id=organization_id,
-                created_by_user_id=principal.user_id,
-            )
-            ScanRepository(session).add(scan)
-            return scan
+            raise
 
     def list_organization_scans(
         self,
         principal: AuthenticatedPrincipal,
         organization_id: UUID,
     ) -> list[SecurityScan]:
-        with unit_of_work(self._session_factory) as session:
-            self._require_organization_action(
-                session,
+        try:
+            with unit_of_work(self._session_factory) as session:
+                self._require_organization_action(
+                    session,
+                    principal,
+                    organization_id,
+                    OrganizationScanAction.LIST,
+                )
+                return ScanRepository(session).list_organization_for(organization_id)
+        except (InactiveUserError, OrganizationAccessDenied) as error:
+            self._record_organization_denial(
                 principal,
                 organization_id,
-                OrganizationScanAction.LIST,
+                "organization.scan.list_denied",
+                self._organization_denial_reason(error),
             )
-            return ScanRepository(session).list_organization_for(organization_id)
+            raise
 
     def get_organization_scan(
         self,
@@ -96,17 +116,30 @@ class ScanService:
         organization_id: UUID,
         scan_id: UUID,
     ) -> SecurityScan:
-        with unit_of_work(self._session_factory) as session:
-            self._require_organization_action(
-                session,
+        try:
+            with unit_of_work(self._session_factory) as session:
+                self._require_organization_action(
+                    session,
+                    principal,
+                    organization_id,
+                    OrganizationScanAction.READ,
+                )
+                scan = ScanRepository(session).find_organization_by_id(scan_id, organization_id)
+                if scan is None:
+                    raise ScanNotFound("The scan was not found.")
+                return scan
+        except (InactiveUserError, OrganizationAccessDenied, ScanNotFound) as error:
+            self._record_organization_denial(
                 principal,
                 organization_id,
-                OrganizationScanAction.READ,
+                "organization.scan.read_denied",
+                (
+                    "resource_unavailable"
+                    if isinstance(error, ScanNotFound)
+                    else self._organization_denial_reason(error)
+                ),
             )
-            scan = ScanRepository(session).find_organization_by_id(scan_id, organization_id)
-            if scan is None:
-                raise ScanNotFound("The scan was not found.")
-            return scan
+            raise
 
     @staticmethod
     def _require_active_user(session: Session, principal: AuthenticatedPrincipal) -> None:
@@ -139,3 +172,26 @@ class ScanService:
             raise OrganizationPermissionDenied(
                 "The user is not authorized for this organization scan action."
             )
+
+    def _record_organization_denial(
+        self,
+        principal: AuthenticatedPrincipal,
+        organization_id: UUID,
+        action: str,
+        reason: str,
+    ) -> None:
+        record_failure_event(
+            principal,
+            action,
+            reason,
+            organization_id=organization_id,
+            unit_of_work_factory=lambda: unit_of_work(self._session_factory),
+        )
+
+    @staticmethod
+    def _organization_denial_reason(error: Exception) -> str:
+        if isinstance(error, OrganizationPermissionDenied):
+            return "insufficient_role"
+        if isinstance(error, InactiveUserError):
+            return "inactive_account"
+        return "scope_unavailable"

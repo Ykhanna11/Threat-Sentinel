@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from threat_sentinel_api.modules.audit.models import SecurityAuditEvent
 from threat_sentinel_api.modules.identity.enums import UserStatus
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
 from threat_sentinel_api.modules.identity.repository import IdentityRepository
@@ -263,6 +264,33 @@ def test_organization_creation_uses_local_role_and_principal_creator(
             ScanRepository(verify_session).find_organization_by_id(scan.id, organization.id)
             is not None
         )
+
+
+def test_organization_scan_authorization_denial_is_audited(
+    engine: Engine,
+    session: Session,
+    make_user: Callable[..., User],
+) -> None:
+    user = make_user(subject="organization-scan-denial")
+    principal = make_principal(session, user)
+    organization = create_organization(session, user, "organization-scan-denial")
+    add_membership(session, organization, user, OrganizationRole.VIEWER)
+    session.commit()
+
+    with pytest.raises(OrganizationPermissionDenied):
+        service_for(engine).create_organization_scan(principal, organization.id)
+
+    with Session(engine) as verify_session:
+        event = verify_session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.organization_id == organization.id,
+                SecurityAuditEvent.action == "organization.scan.create_denied",
+            )
+        )
+        assert event is not None
+        assert event.actor_user_id == principal.user_id
+        assert event.outcome == "failure"
+        assert event.details == {"reason": "insufficient_role"}
 
 
 @pytest.mark.parametrize("role", list(OrganizationRole))
