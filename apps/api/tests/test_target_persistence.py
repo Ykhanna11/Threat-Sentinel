@@ -1,5 +1,6 @@
 from base64 import urlsafe_b64decode
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID, uuid4
@@ -9,9 +10,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from threat_sentinel_api.db import session as database_session
 from threat_sentinel_api.modules.audit.models import SecurityAuditEvent
 from threat_sentinel_api.modules.identity.models import ExternalIdentity, User
 from threat_sentinel_api.modules.identity.schemas import AuthenticatedPrincipal
+from threat_sentinel_api.modules.targets.dns_verification import DNSVerificationError
 from threat_sentinel_api.modules.targets.hostname import HostnameCanonicalizationError
 from threat_sentinel_api.modules.targets.models import (
     SecurityTarget,
@@ -19,6 +22,7 @@ from threat_sentinel_api.modules.targets.models import (
 )
 from threat_sentinel_api.modules.targets.service import (
     TargetConflict,
+    TargetVerificationFailed,
     TargetService,
 )
 from threat_sentinel_api.modules.tenants.authorization import (
@@ -36,9 +40,39 @@ from threat_sentinel_api.modules.tenants.service import (
     OrganizationPermissionDenied,
     OrganizationScopeUnavailable,
 )
-from threat_sentinel_api.modules.targets.repository import TargetRepository
 
 ISSUER = "https://target-tests.example"
+
+
+class FakeDNSVerifier:
+    def __init__(self, challenge_value: str) -> None:
+        self.challenge_hash = sha256(challenge_value.encode("ascii")).hexdigest()
+        self.calls: list[tuple[str, str]] = []
+
+    def verify_challenge(self, hostname: str, expected_hash: str) -> None:
+        self.calls.append((hostname, expected_hash))
+        if expected_hash != self.challenge_hash:
+            raise DNSVerificationError()
+
+
+class CallbackDNSVerifier:
+    def __init__(self, callback: Callable[[], None]) -> None:
+        self._callback = callback
+        self.calls: list[tuple[str, str]] = []
+
+    def verify_challenge(self, hostname: str, expected_hash: str) -> None:
+        self.calls.append((hostname, expected_hash))
+        self._callback()
+
+
+class UnexpectedDNSVerifier:
+    def verify_challenge(self, hostname: str, expected_hash: str) -> None:
+        raise RuntimeError("resolver internal detail")
+
+
+class FatalDNSVerifier:
+    def verify_challenge(self, hostname: str, expected_hash: str) -> None:
+        raise KeyboardInterrupt
 
 
 def create_organization_principal(
@@ -78,8 +112,16 @@ def create_organization_principal(
     return organization, principal, user
 
 
-def target_service(session: Session) -> TargetService:
-    return TargetService(sessionmaker(bind=session.get_bind(), expire_on_commit=False))
+def target_service(
+    session: Session,
+    dns_verifier: (
+        FakeDNSVerifier | CallbackDNSVerifier | UnexpectedDNSVerifier | FatalDNSVerifier | None
+    ) = None,
+) -> TargetService:
+    return TargetService(
+        sessionmaker(bind=session.get_bind(), expire_on_commit=False),
+        dns_verifier=dns_verifier,
+    )
 
 
 def get_challenge(
@@ -246,7 +288,7 @@ def test_duplicate_canonical_hostname_is_unique_within_organization(
             verification_session.flush()
 
 
-def test_challenge_rotation_consumption_is_one_time_and_does_not_verify_target(
+def test_rotation_invalidates_old_challenge_and_dns_verification_is_one_time(
     session: Session,
     make_user: Callable[..., User],
 ) -> None:
@@ -274,47 +316,38 @@ def test_challenge_rotation_consumption_is_one_time_and_does_not_verify_target(
             != sha256(initial.challenge_value.encode("ascii")).hexdigest()
         )
 
-    assert not service.consume_challenge_after_dns_proof(
+    stale_verifier = FakeDNSVerifier(initial.challenge_value)
+    stale_service = target_service(session, stale_verifier)
+    with pytest.raises(TargetVerificationFailed):
+        stale_service.verify_organization_target(principal, organization.id, initial.target_id)
+
+    successful_service = target_service(session, FakeDNSVerifier(rotated.challenge_value))
+    verified_at = successful_service.verify_organization_target(
         principal,
         organization.id,
         initial.target_id,
-        "incorrect-value",
     )
-    assert not service.consume_challenge_after_dns_proof(
-        principal,
-        organization.id,
-        initial.target_id,
-        "x" * 129,
-    )
-    assert not service.consume_challenge_after_dns_proof(
-        principal,
-        organization.id,
-        initial.target_id,
-        "\ud800",
-    )
-    assert not service.consume_challenge_after_dns_proof(
-        principal,
-        organization.id,
-        initial.target_id,
-        initial.challenge_value,
-    )
-    assert service.consume_challenge_after_dns_proof(
-        principal,
-        organization.id,
-        initial.target_id,
-        rotated.challenge_value,
-    )
-    assert not service.consume_challenge_after_dns_proof(
-        principal,
-        organization.id,
-        initial.target_id,
-        rotated.challenge_value,
-    )
+    with pytest.raises(TargetVerificationFailed):
+        successful_service.verify_organization_target(
+            principal,
+            organization.id,
+            initial.target_id,
+        )
 
     with Session(session.get_bind()) as verification_session:
         target = verification_session.get(SecurityTarget, initial.target_id)
         assert target is not None
-        assert target.verified_at is None
+        assert target.verified_at is not None
+        assert target.verified_at.replace(tzinfo=UTC) == verified_at
+        verification_event = verification_session.scalar(
+            select(SecurityAuditEvent).where(
+                SecurityAuditEvent.target_id == initial.target_id,
+                SecurityAuditEvent.action == "organization.target.verified",
+            )
+        )
+        assert verification_event is not None
+        assert verification_event.details is None
+        assert rotated.challenge_value not in repr(verification_event)
         assert (
             verification_session.scalar(
                 select(TargetVerificationChallenge.id).where(
@@ -325,7 +358,7 @@ def test_challenge_rotation_consumption_is_one_time_and_does_not_verify_target(
         )
 
 
-def test_expired_challenge_cannot_be_consumed(
+def test_expired_challenge_is_rejected_before_dns_resolution(
     session: Session,
     make_user: Callable[..., User],
 ) -> None:
@@ -334,23 +367,77 @@ def test_expired_challenge_cannot_be_consumed(
     service = target_service(session)
     issued = service.create_organization_target(principal, organization.id, "example.com")
     with Session(session.get_bind()) as update_session:
-        assert not TargetRepository(update_session).consume_challenge_after_dns_proof(
-            organization.id,
-            issued.target_id,
-            issued.challenge_value,
-            now=datetime.now(UTC) + timedelta(days=2),
-        )
+        challenge = get_challenge(update_session, issued.target_id)
+        challenge.created_at = datetime.now(UTC) - timedelta(days=2)
+        challenge.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        update_session.commit()
+    verifier = FakeDNSVerifier(issued.challenge_value)
+    service = target_service(session, verifier)
+
+    with pytest.raises(TargetVerificationFailed):
+        service.verify_organization_target(principal, organization.id, issued.target_id)
+    assert verifier.calls == []
+
+    with Session(session.get_bind()) as verification_session:
+        target = verification_session.get(SecurityTarget, issued.target_id)
+        assert target is not None
+        assert target.verified_at is None
         assert (
-            update_session.scalar(
+            verification_session.scalar(
                 select(TargetVerificationChallenge.id).where(
                     TargetVerificationChallenge.target_id == issued.target_id
                 )
             )
-            is None
+            is not None
         )
 
 
-def test_revoked_challenge_cannot_be_consumed(
+def test_unexpected_dns_verifier_exception_becomes_generic_service_error(
+    session: Session,
+    make_user: Callable[..., User],
+) -> None:
+    organization, principal, _ = create_organization_principal(session, make_user)
+    session.commit()
+    issued = target_service(session).create_organization_target(
+        principal,
+        organization.id,
+        "example.com",
+    )
+
+    with pytest.raises(TargetVerificationFailed) as error:
+        target_service(session, UnexpectedDNSVerifier()).verify_organization_target(
+            principal,
+            organization.id,
+            issued.target_id,
+        )
+
+    assert str(error.value) == "DNS ownership verification failed."
+    assert error.value.__cause__ is None
+    assert error.value.__suppress_context__
+    assert "resolver internal detail" not in str(error.value)
+
+
+def test_dns_verifier_does_not_catch_base_exception(
+    session: Session,
+    make_user: Callable[..., User],
+) -> None:
+    organization, principal, _ = create_organization_principal(session, make_user)
+    session.commit()
+    issued = target_service(session).create_organization_target(
+        principal,
+        organization.id,
+        "example.com",
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        target_service(session, FatalDNSVerifier()).verify_organization_target(
+            principal,
+            organization.id,
+            issued.target_id,
+        )
+
+
+def test_revoked_challenge_cannot_be_verified(
     session: Session,
     make_user: Callable[..., User],
 ) -> None:
@@ -367,12 +454,14 @@ def test_revoked_challenge_cannot_be_consumed(
         issued.target_id,
         challenge_id,
     )
-    assert not service.consume_challenge_after_dns_proof(
-        principal,
-        organization.id,
-        issued.target_id,
-        issued.challenge_value,
-    )
+    verifier = FakeDNSVerifier(issued.challenge_value)
+    with pytest.raises(TargetVerificationFailed):
+        target_service(session, verifier).verify_organization_target(
+            principal,
+            organization.id,
+            issued.target_id,
+        )
+    assert verifier.calls == []
     with Session(session.get_bind()) as verification_session:
         assert (
             verification_session.scalar(
@@ -382,6 +471,133 @@ def test_revoked_challenge_cannot_be_consumed(
             )
             is None
         )
+
+
+@pytest.mark.parametrize("during_dns", ["rotate", "revoke", "expire"])
+def test_challenge_changes_during_dns_invalidate_verification_without_open_transaction(
+    session: Session,
+    make_user: Callable[..., User],
+    monkeypatch: pytest.MonkeyPatch,
+    during_dns: str,
+) -> None:
+    organization, principal, _ = create_organization_principal(session, make_user)
+    session.commit()
+    service = target_service(session)
+    issued = service.create_organization_target(principal, organization.id, "example.com")
+    with Session(session.get_bind()) as verification_session:
+        challenge_id = get_challenge(verification_session, issued.target_id).id
+
+    original_unit_of_work = database_session.unit_of_work
+    active_transactions = 0
+
+    @contextmanager
+    def tracked_unit_of_work(session_factory=None) -> Iterator[Session]:
+        nonlocal active_transactions
+        with original_unit_of_work(session_factory) as work_session:
+            active_transactions += 1
+            try:
+                yield work_session
+            finally:
+                active_transactions -= 1
+
+    monkeypatch.setattr(
+        "threat_sentinel_api.modules.targets.service.unit_of_work",
+        tracked_unit_of_work,
+    )
+
+    def change_challenge() -> None:
+        assert active_transactions == 0
+        if during_dns == "rotate":
+            service.rotate_challenge(principal, organization.id, issued.target_id)
+        elif during_dns == "revoke":
+            assert service.revoke_challenge(
+                principal,
+                organization.id,
+                issued.target_id,
+                challenge_id,
+            )
+        else:
+            with Session(session.get_bind()) as update_session:
+                challenge = get_challenge(update_session, issued.target_id)
+                challenge.created_at = datetime.now(UTC) - timedelta(days=2)
+                challenge.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+                update_session.commit()
+
+    verifier = CallbackDNSVerifier(change_challenge)
+    verification_service = target_service(session, verifier)
+    with pytest.raises(TargetVerificationFailed):
+        verification_service.verify_organization_target(
+            principal,
+            organization.id,
+            issued.target_id,
+        )
+
+    assert verifier.calls == [
+        ("example.com", sha256(issued.challenge_value.encode("ascii")).hexdigest())
+    ]
+    with Session(session.get_bind()) as verification_session:
+        target = verification_session.get(SecurityTarget, issued.target_id)
+        assert target is not None
+        assert target.verified_at is None
+        challenge = verification_session.scalar(
+            select(TargetVerificationChallenge).where(
+                TargetVerificationChallenge.target_id == issued.target_id
+            )
+        )
+        if during_dns == "rotate":
+            assert challenge is not None
+            assert (
+                challenge.challenge_hash
+                != sha256(issued.challenge_value.encode("ascii")).hexdigest()
+            )
+        elif during_dns == "revoke":
+            assert challenge is None
+        else:
+            assert challenge is not None
+
+
+def test_member_cannot_verify_an_organization_target(
+    session: Session,
+    make_user: Callable[..., User],
+) -> None:
+    organization, owner_principal, _ = create_organization_principal(session, make_user)
+    session.commit()
+    issued = target_service(session).create_organization_target(
+        owner_principal,
+        organization.id,
+        "example.com",
+    )
+    subject = f"target-member-{uuid4()}"
+    member = make_user(issuer=ISSUER, subject=subject)
+    identity_id = session.scalar(
+        select(ExternalIdentity.id).where(ExternalIdentity.user_id == member.id)
+    )
+    assert identity_id is not None
+    session.add(
+        OrganizationMembership(
+            organization_id=organization.id,
+            user_id=member.id,
+            role=OrganizationRole.MEMBER,
+            status=MembershipStatus.ACTIVE,
+        )
+    )
+    session.commit()
+    member_principal = AuthenticatedPrincipal(
+        user_id=member.id,
+        external_identity_id=identity_id,
+        issuer=ISSUER,
+        subject=subject,
+    )
+    verifier = FakeDNSVerifier(issued.challenge_value)
+
+    with pytest.raises(OrganizationPermissionDenied):
+        target_service(session, verifier).verify_organization_target(
+            member_principal,
+            organization.id,
+            issued.target_id,
+        )
+
+    assert verifier.calls == []
 
 
 def test_challenge_and_target_queries_are_organization_scoped(
@@ -438,7 +654,7 @@ def test_same_canonical_hostname_can_be_owned_by_different_organizations(
     assert first.target_id != second.target_id
 
 
-def test_challenge_consumption_does_not_accept_another_organizations_scope(
+def test_verification_does_not_accept_another_organizations_scope(
     session: Session,
     make_user: Callable[..., User],
 ) -> None:
@@ -451,9 +667,8 @@ def test_challenge_consumption_does_not_accept_another_organizations_scope(
         "example.com",
     )
     with pytest.raises(OrganizationScopeUnavailable):
-        target_service(session).consume_challenge_after_dns_proof(
+        target_service(session, FakeDNSVerifier(issued.challenge_value)).verify_organization_target(
             principal,
             second_organization.id,
             issued.target_id,
-            issued.challenge_value,
         )

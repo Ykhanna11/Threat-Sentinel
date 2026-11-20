@@ -4,13 +4,12 @@
 
 The product owner has approved the nine architecture decisions listed near the end of this
 document and formally signed off and closed Phase 3A. Phase 3B is authorized. This specification
-records intended behavior; it does not claim that DNS TXT ownership verification, secure DNS
-resolution, scanning, queue, worker, result API, or UI has been implemented. Phase 3B is underway.
-Phase 3B.1 hostname canonicalization is implemented and pending final acceptance. Phase 3B.2
-organization target and verification-challenge persistence is implemented as a foundation only;
-issuing, rotating, or consuming a challenge does not establish DNS ownership or mark a target
-verified. No target API or issuance rate limit is implemented; enforce rate limits before exposing
-challenge operations.
+records intended behavior; Phase 3B.3 implements server-side DNS TXT verification for organization
+targets, including atomic one-time challenge consumption and `verified_at` updates. This is a
+service capability only: no public target API or issuance/verification rate limit is implemented.
+Phase 3B.1 hostname canonicalization is implemented and pending final acceptance. Secure A/AAAA
+resolution, HTTP scanning, queues, workers, result APIs, UI, and production egress controls remain
+unimplemented; this is not a production-readiness claim.
 
 The design preserves the Phase 2 identity, tenancy, authorization, audit, lifecycle, and scan-record
 foundations. It keeps the backend a modular monolith, adds a separately run Python worker, uses
@@ -40,8 +39,10 @@ plane.
 The `security_scans` table and protected scan routes currently create, list, and retrieve records
 within personal or organization scope. A scan-create request has no target or execution options;
 the record has no run state, findings, or evidence. **Existing scan creation is persistence only:
-it does not make a network request or perform a scan.** There is no target verification, scanner
-registry, queue, worker, progress/cancellation API, finding analysis, report, or scan-result UI.
+it does not make a network request or perform a scan.** No public target API, HTTP scanner, scanner
+registry, queue, worker, progress/cancellation API, finding analysis, report, or scan-result UI is
+implemented. A server-side Phase 3B.3 organization-target DNS TXT verification service now exists,
+but it is not exposed by a route or combined with target-address resolution or execution.
 
 Phase 2 organization scan-record permissions remain unchanged: OWNER, ADMIN, and MEMBER may create
 records; all four roles, including VIEWER, may read/list records. Phase 3 target management,
@@ -126,7 +127,8 @@ for short state transitions only; they must never be held across DNS, TLS, or HT
    challenges.
 4. An explicit verification operation queries TXT records using a bounded resolver. Accept only an
    exact challenge match for the requested exact hostname and unexpired challenge. On success,
-   atomically consume the challenge and record verification time, method, and policy version.
+   atomically consume the challenge and record verification time. The current target model does not
+   persist the verification method or policy version.
 5. Verification is scope-bound. An organization member cannot reuse a personal target's
    verification or transfer it across organizations. A subdomain requires its own separate
    challenge. Wildcards and IP-address targets are not accepted.
@@ -143,9 +145,29 @@ non-empty labels. It rejects surrounding or embedded whitespace, URLs and their 
 literals and identifiable alternate numeric IP forms, wildcards, malformed separators, and
 invalid IDNA labels. It does not trim or repair malformed input. This is syntactic canonicalization
 only: it does not prove DNS resolution, public address status, ownership, authorization, or
-permission to scan. DNS TXT ownership verification remains a separate required step. The IDNA
-profile and library choice are resolved for Phase 3B.1; DNS resolver/client and other verification
-decisions remain open for their respective Phase 3B milestones.
+permission to scan. The IDNA profile and library choice are resolved for Phase 3B.1.
+
+**Phase 3B.3 implementation:** For organization targets, the server queries the exact absolute owner
+`_threatsentinel-verification.<canonical-hostname>.` using dnspython and the system-configured
+recursive resolver. Each DNS query has a shared 3-second budget across only the configured numeric
+IP nameservers; a failed nameserver can fall through to the next configured one within that budget.
+Unsupported nameserver configurations fail closed. The complete CNAME/TXT lookup is limited to
+10 seconds and CNAME traversal to 8 links. A truncated UDP reply is retried once over TCP within
+that query's remaining deadline. Responses over 64 KiB, with more than 128 resource records across
+all sections, unsupported classes/types, non-empty authority/additional sections, malformed or
+unexpected answers, unresolved truncation, loops, timeouts, or other resolver errors fail closed.
+TXT character-string chunks are concatenated only within their individual TXT record; each record's
+bytes are independently SHA-256 hashed and compared with the persisted challenge hash. No case
+folding, whitespace normalization, substring matching, or combination of distinct TXT records is
+used. Challenge values and DNS answer contents are not logged or persisted.
+
+The service reads the target and active challenge hash in a short authorized transaction, resolves
+DNS without a database transaction or target lock, then revalidates membership, target scope and
+eligibility, challenge identity/hash, and expiry in a new transaction. It atomically consumes the
+challenge and sets `verified_at`; rotation, revocation, expiry, or a concurrent successful attempt
+invalidates the pending verification. OWNER/ADMIN are the only authorized organization actors.
+There is no public target route, rate limiter, A/AAAA target-address validation, HTTP request, or
+scanner in this implementation. Target verification expiry/reverification policy remains open.
 
 #### Per-connection DNS and IP safety
 
@@ -391,15 +413,17 @@ administrative correction if such an authority is ever approved.
 ### F. Data model blueprint
 
 These are proposed responsibilities and relationships except for the Phase 3B.2
-`security_targets` and `target_verification_challenges` organization-only persistence foundation,
-which is implemented by an additive Alembic migration. B.2 does not implement DNS verification,
-scan/run data, or any change to existing records. Preserve existing `security_scans` scope and
-creator constraints.
+`security_targets` and `target_verification_challenges` organization-only persistence foundation
+and the Phase 3B.3 organization-target DNS TXT verification service. The additive 3B.2 migration
+implements organization-owned canonical exact hostnames and hash-only challenges; it does not imply
+that challenge creation establishes DNS ownership. Phase 3B.3 subsequently implements the bounded
+DNS verification orchestration and atomic successful consumption described above. It does not add
+scan/run data or change existing `security_scans` scope or creator constraints.
 
 | Entity | Responsibility and relationship |
 |---|---|
-| `security_targets` | Phase 3B.2 implements organization-owned canonical exact hostnames, creator, and nullable `verified_at` (left unset by challenge operations); a per-organization canonical-host uniqueness constraint prevents duplicates. Future personal scope and verification metadata remain planned. |
-| `target_verification_challenges` | Phase 3B.2 stores one SHA-256 hash and issue/expiry timestamps per organization target, never plaintext. Rotation replaces the current hash; revocation, successful consumption, and expired consume attempts remove the challenge row. The persistence-only consume primitive requires an upstream exact DNS TXT match and does not mark the target verified. |
+| `security_targets` | Phase 3B.2 implements organization-owned canonical exact hostnames, creator, and nullable `verified_at`; issuing or rotating a challenge alone leaves `verified_at` unset. Phase 3B.3 atomically sets `verified_at` only after exact DNS TXT proof is revalidated and the challenge is consumed. A per-organization canonical-host uniqueness constraint prevents duplicates. Future personal scope and verification metadata remain planned. |
+| `target_verification_challenges` | Phase 3B.2 stores one SHA-256 hash and issue/expiry timestamps per organization target, never plaintext. Its historical challenge operations support one-hour issuance, rotation, revocation, and challenge-hash-only persistence. Phase 3B.3 verifies the exact TXT record against the active hash outside database transactions, revalidates it in a new transaction, and atomically consumes only the matching unexpired row before setting `verified_at`. Concurrent, rotated, revoked, or expired challenges cannot establish verification. |
 | `security_scans` | Preserve Phase 2 scan record and creator/scope contract. Add a nullable target reference for migration compatibility; new executable scans require a verified target. Existing empty Phase 2 records remain valid and are not given fabricated targets or runs. |
 | `scan_runs` | One logical requested execution and durable queue state, target/config snapshot, requester, lifecycle timestamps, bounded progress, cancellation state, current lease/fencing token and expiry, policy/scanner provenance, and API idempotency identity. A scan may have multiple logical runs over time. |
 | `scan_attempts` | One worker claim/execution attempt per logical run: attempt number, worker build/identifier, lease provenance, start/end, outcome/error category, and bounded timing. Unique `(run_id, attempt_number)`. Retries append attempts. |
@@ -663,7 +687,7 @@ before production scanning. A green unit-test suite is not proof of safe product
 | Phase | Scope and dependencies | Exit criteria and boundary |
 |---|---|---|
 | **3A — Architecture and threat model** | This specification; depends on Phase 2 foundation. | The nine product-owner-approved architecture decisions are recorded; the complete Phase 3A specification is formally signed off and closed. Documentation only; this sign-off does not itself implement features. |
-| **3B — Target verification and outbound security** | Authorized after 3A sign-off and underway. Phase 3B.1 implements hostname canonicalization, pending final acceptance. Phase 3B.2 adds organization-only target and challenge persistence with a one-hour initial challenge expiry; challenge creation/consumption is not DNS ownership verification. No scan/run schema, resolver, API route, rate limit, or network transport is added in this subphase. Define and test exact-host TXT lifecycle, resolver/address policy, DNS-pinned connection primitives, TLS/SNI, redirect refusal, limits, and documented egress requirements. | Deterministic DNS/transport tests prove unverified and prohibited targets never connect; verification is scope-bound, expiring, replay-resistant; egress-control deployment design is reviewed. No scanner modules. |
+| **3B — Target verification and outbound security** | Authorized after 3A sign-off and underway. Phase 3B.1 implements hostname canonicalization, pending final acceptance. Phase 3B.2 adds organization-only target and challenge persistence with a one-hour initial challenge expiry. Phase 3B.3 adds bounded organization-target DNS TXT verification and atomic challenge consumption, but no public target API, rate limit, A/AAAA policy, or HTTP transport. Remaining work includes DNS-pinned connection primitives, TLS/SNI, redirect refusal, address policy, and documented egress requirements. | Deterministic DNS fixtures validate exact ownership proof and race behavior. Before any target route is exposed, add rate limits and review API controls; before any connection, implement and validate address/egress policy. No scanner modules. |
 | **3C — Persistence and execution contracts** | Depends on approved 3B target and policy contracts. Additive target/run/attempt/finding/evidence schema blueprint into implementation, versioned typed contracts, constraints/indexes, idempotency and provenance. | Phase 2 migration compatibility; migration upgrade/downgrade checks; PostgreSQL constraints and tenant-scoped repository tests. No network scanning or worker dispatch. |
 | **3D — Durable queue and worker** | Depends on 3C lifecycle/schema and 3B egress boundary. Implement PostgreSQL claim/lease/heartbeat/fencing, admission, retries, cancellation, reaper, isolated worker process. | PostgreSQL concurrency tests cover duplicate claims, crash recovery, stale workers, cancellation, retry ceiling, no open network transaction, and no duplicate persisted results. No detection modules. |
 | **3E — Scanner framework and safe transport** | Depends on 3B transport policy, 3C contract, and 3D execution lifecycle. Implement only a static trusted registry, bounded execution context, typed progress/observations/findings/errors, safe shared client. | All scanners must use the guarded transport; version/provenance and resource budgets are enforced; adversarial network fixture suite passes. No arbitrary plugins or exploit behavior. |
@@ -748,17 +772,17 @@ specification has also received formal sign-off and is closed.
 ## Open risks and implementation decisions
 
 The product-owner-approved principles leave implementation parameters that must be resolved before
-the relevant phase: exact DNS challenge record/value format and TTL; DNS resolver/client
-implementation; prohibited IP/special-use range source and update policy; admission
+the relevant phase: DNS challenge record TTL; target-verification expiry/reverification policy;
+prohibited IP/special-use range source and update policy; admission
 quota and queue retry policies; exact scanner-owned fixed header allowlist; exact severity/confidence
-rule rubric; target verification expiry/reverification policy; scan idempotency key lifetime;
+rule rubric; scan idempotency key lifetime;
 whether targets survive after all scans expire; user-initiated deletion semantics; audit action
 coverage; exact worker SQL grants and OS/container restrictions; production egress architecture and
 deployment-wide outbound concurrency enforcement before adding processes/replicas; and production
 cost. The selected initial network and retention defaults are approved in Phase 3A. The IDNA
-profile and canonicalization behavior are resolved in Phase 3B.1; DNS resolver/client selection,
-challenge details, verification expiry, and egress decisions remain assigned to their appropriate
-Phase 3B milestones.
+profile and canonicalization behavior are resolved in Phase 3B.1. The resolver, exact TXT owner and
+matching behavior, and server-side challenge-consumption flow are implemented in Phase 3B.3;
+verification expiry and egress decisions remain assigned to their appropriate Phase 3B milestones.
 
 These are not permission to broaden scan behavior. If a parameter is not specified, implementation
 must choose a conservative fail-closed value and obtain review where it changes customer-visible
@@ -775,13 +799,14 @@ prerequisite before enabling its dependent feature.
   canonical lowercase A-label output, Unicode normalization and round-trip validation, and
   optional single trailing root-dot removal. Canonicalization does not constitute target
   authorization; DNS TXT verification remains separate.
-- **Resolved in Phase 3B.2 for challenge persistence only:** 256-bit URL-safe challenge material,
-  SHA-256 hash-only persistence, one-hour initial expiry, and one-time rotation/revocation/
-  consumption state. Consumption is a post-proof persistence primitive only; no DNS proof or
-  target verification is implemented.
-- **Before/during Phase 3B — target verification and outbound security:** DNS resolver and client
-  selection; DNS TXT record name/value protocol and record-matching semantics; target-verification
-  expiry and re-verification behavior;
+- **Resolved in Phase 3B.2 for challenge persistence:** 256-bit URL-safe challenge material,
+  SHA-256 hash-only persistence, one-hour initial expiry, and one-time rotation/revocation state.
+- **Implemented in Phase 3B.3 for organization targets:** exact TXT owner and byte-for-byte record
+  matching, dnspython with the system resolver, 3-second query/10-second overall bounds, 8-link
+  CNAME limit, one TCP retry for truncation, and authorized two-transaction verification with
+  atomic challenge consumption. No public target route or rate limit is implemented.
+- **Before/during remaining Phase 3B — target verification and outbound security:** DNS challenge
+  record TTL; target-verification expiry and re-verification behavior;
   prohibited/special-use IP range source and update policy; HTTP/1.1 transport implementation
   choice and ALPN enforcement; DNS pinning, connection behavior, and the production egress-security
   design required to validate the boundary.
@@ -811,5 +836,6 @@ claims production readiness. Phase 3A is signed off and closed, and Phase 3B is 
 approved architecture decisions, the Phase 2 permissions and behavior, and the
 immutable hostname verification, HTTP/HTTPS port, GET/HEAD, origin-root, no-credentials,
 no-arbitrary-headers, no-redirects, DNS-validation, and TLS-verification boundaries remain
-unchanged. No Phase 3 target verification, worker, finding, evidence, execution, or production
+unchanged. The documented Phase 3B.3 server-side organization-target DNS TXT verification service
+is implemented, but no public target API, worker, finding, evidence, HTTP execution, or production
 readiness capability is claimed here.

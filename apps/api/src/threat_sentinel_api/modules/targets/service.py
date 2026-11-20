@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -9,7 +9,14 @@ from threat_sentinel_api.modules.audit.recording import record_failure_event
 from threat_sentinel_api.modules.audit.service import AuditService
 from threat_sentinel_api.modules.identity.schemas import AuthenticatedPrincipal
 from threat_sentinel_api.modules.identity.service import InactiveUserError
-from threat_sentinel_api.modules.targets.hostname import canonicalize_hostname
+from threat_sentinel_api.modules.targets.dns_verification import (
+    DNSChallengeVerification,
+    DNSChallengeVerifier,
+)
+from threat_sentinel_api.modules.targets.hostname import (
+    HostnameCanonicalizationError,
+    canonicalize_hostname,
+)
 from threat_sentinel_api.modules.targets.models import SecurityTarget
 from threat_sentinel_api.modules.targets.repository import TargetRepository
 from threat_sentinel_api.modules.tenants.authorization import (
@@ -40,9 +47,21 @@ class TargetConflict(RuntimeError):
     """Raised when the organization already owns the canonical hostname."""
 
 
+class TargetVerificationFailed(RuntimeError):
+    """Raised when DNS ownership cannot be verified without disclosing DNS details."""
+
+    def __init__(self) -> None:
+        super().__init__("DNS ownership verification failed.")
+
+
 class TargetService:
-    def __init__(self, session_factory: SessionFactory | None = None) -> None:
+    def __init__(
+        self,
+        session_factory: SessionFactory | None = None,
+        dns_verifier: DNSChallengeVerification | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._dns_verifier = dns_verifier if dns_verifier is not None else DNSChallengeVerifier()
 
     def create_organization_target(
         self,
@@ -161,14 +180,55 @@ class TargetService:
             )
             raise
 
-    def consume_challenge_after_dns_proof(
+    def verify_organization_target(
         self,
         principal: AuthenticatedPrincipal,
         organization_id: UUID,
         target_id: UUID,
-        challenge_value: str,
-    ) -> bool:
-        """Persist a post-proof one-time consume; no DNS lookup or target verification occurs."""
+    ) -> datetime:
+        """Verify the active TXT challenge without holding database locks during DNS resolution."""
+        try:
+            with unit_of_work(self._session_factory) as session:
+                self._require_action(
+                    session,
+                    principal,
+                    organization_id,
+                    OrganizationTargetAction.VERIFY,
+                )
+                repository = TargetRepository(session)
+                target = repository.find_by_id(target_id, organization_id)
+                if target is None:
+                    raise TargetNotFound("The target was not found.")
+                if target.verified_at is not None:
+                    raise TargetVerificationFailed()
+                challenge = repository.find_active_challenge(
+                    organization_id,
+                    target.id,
+                )
+                if challenge is None:
+                    raise TargetVerificationFailed()
+                hostname = target.hostname
+                challenge_id = challenge.id
+                challenge_hash = challenge.challenge_hash
+        except (InactiveUserError, OrganizationAccessDenied, TargetNotFound) as error:
+            self._record_denial(
+                principal,
+                organization_id,
+                "organization.target.verification_denied",
+                self._denial_reason(error),
+            )
+            raise
+
+        try:
+            canonical_hostname = canonicalize_hostname(hostname)
+        except HostnameCanonicalizationError:
+            raise TargetVerificationFailed() from None
+
+        try:
+            self._dns_verifier.verify_challenge(canonical_hostname, challenge_hash)
+        except Exception:
+            raise TargetVerificationFailed() from None
+
         try:
             with unit_of_work(self._session_factory) as session:
                 target = self._require_target_action(
@@ -176,34 +236,36 @@ class TargetService:
                     principal,
                     organization_id,
                     target_id,
-                    OrganizationTargetAction.CONSUME_CHALLENGE,
+                    OrganizationTargetAction.VERIFY,
                 )
-                consumed = TargetRepository(session).consume_challenge_after_dns_proof(
+                if target.verified_at is not None or target.hostname != hostname:
+                    raise TargetVerificationFailed()
+                verified_at = datetime.now(UTC)
+                verified = TargetRepository(session).verify_target_after_dns_proof(
+                    target,
                     organization_id,
-                    target.id,
-                    challenge_value,
+                    challenge_id,
+                    challenge_hash,
+                    now=verified_at,
                 )
+                if not verified:
+                    raise TargetVerificationFailed()
                 AuditService(session).record(
-                    action=(
-                        "organization.target.challenge_consumed_after_dns_proof"
-                        if consumed
-                        else "organization.target.challenge_consumption_after_dns_proof_not_applied"
-                    ),
+                    action="organization.target.verified",
                     actor_user_id=principal.user_id,
                     organization_id=organization_id,
                     target_type="security_target",
                     target_id=target.id,
-                    outcome="success" if consumed else "failure",
                 )
-                return consumed
         except (InactiveUserError, OrganizationAccessDenied, TargetNotFound) as error:
             self._record_denial(
                 principal,
                 organization_id,
-                "organization.target.challenge_consumption_denied",
+                "organization.target.verification_denied",
                 self._denial_reason(error),
             )
             raise
+        return verified_at
 
     @staticmethod
     def _issue(

@@ -17,7 +17,7 @@ class OrganizationTargetAction(StrEnum):
     CREATE = "create"
     ROTATE_CHALLENGE = "rotate_challenge"
     REVOKE_CHALLENGE = "revoke_challenge"
-    CONSUME_CHALLENGE = "consume_challenge"
+    VERIFY = "verify"
 
 
 _ALLOWED_ROLES_BY_ACTION: dict[OrganizationScanAction, frozenset[OrganizationRole]] = {

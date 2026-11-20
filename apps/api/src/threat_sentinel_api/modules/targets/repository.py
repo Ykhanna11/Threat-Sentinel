@@ -42,6 +42,22 @@ class TargetRepository:
             )
         )
 
+    def find_active_challenge(
+        self,
+        organization_id: UUID,
+        target_id: UUID,
+        *,
+        now: datetime | None = None,
+    ) -> TargetVerificationChallenge | None:
+        current_time = now or datetime.now(UTC)
+        return self._session.scalar(
+            select(TargetVerificationChallenge).where(
+                TargetVerificationChallenge.organization_id == organization_id,
+                TargetVerificationChallenge.target_id == target_id,
+                TargetVerificationChallenge.expires_at > current_time,
+            )
+        )
+
     def add_target(
         self,
         organization_id: UUID,
@@ -114,47 +130,30 @@ class TargetRepository:
         )
         return result.scalar_one_or_none() is not None
 
-    def consume_challenge_after_dns_proof(
+    def verify_target_after_dns_proof(
         self,
+        target: SecurityTarget,
         organization_id: UUID,
-        target_id: UUID,
-        challenge_value: str,
+        challenge_id: UUID,
+        challenge_hash: str,
         *,
         now: datetime | None = None,
     ) -> bool:
-        """Atomically consume only after a caller has independently matched the DNS TXT proof.
-
-        This persistence primitive never marks the target verified. There is intentionally no
-        DNS resolver or verification implementation in this milestone.
-        """
-        if (
-            not isinstance(challenge_value, str)
-            or not challenge_value
-            or len(challenge_value) > 128
-            or not challenge_value.isascii()
-        ):
-            return False
-        challenge_hash = sha256(challenge_value.encode("ascii")).hexdigest()
-        consumed_at = now or datetime.now(UTC)
+        """Atomically consume the challenge snapshot and mark its locked target verified."""
+        verified_at = now or datetime.now(UTC)
         result = self._session.execute(
             delete(TargetVerificationChallenge)
             .where(
+                TargetVerificationChallenge.id == challenge_id,
                 TargetVerificationChallenge.organization_id == organization_id,
-                TargetVerificationChallenge.target_id == target_id,
+                TargetVerificationChallenge.target_id == target.id,
                 TargetVerificationChallenge.challenge_hash == challenge_hash,
-                TargetVerificationChallenge.expires_at > consumed_at,
+                TargetVerificationChallenge.expires_at > verified_at,
             )
             .returning(TargetVerificationChallenge.id)
         )
-        if result.scalar_one_or_none() is not None:
-            return True
-
-        self._session.execute(
-            delete(TargetVerificationChallenge).where(
-                TargetVerificationChallenge.organization_id == organization_id,
-                TargetVerificationChallenge.target_id == target_id,
-                TargetVerificationChallenge.challenge_hash == challenge_hash,
-                TargetVerificationChallenge.expires_at <= consumed_at,
-            )
-        )
-        return False
+        if result.scalar_one_or_none() is None:
+            return False
+        target.verified_at = verified_at
+        self._session.flush()
+        return True

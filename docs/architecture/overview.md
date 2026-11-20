@@ -145,11 +145,13 @@ exact-host DNS TXT verification, controlled outbound networking, a PostgreSQL-ba
 isolated Python worker, and read-only detection modules. The Phase 3A specification is formally
 approved and closed; Phase 3B is authorized and underway. Phase 3B.1 hostname canonicalization is
 implemented and pending final acceptance. Phase 3B.2 organization target and challenge persistence
-is implemented as a foundation only. It does not verify DNS ownership or mark targets verified;
-DNS TXT verification, secure DNS resolution, scanning, target API routes, and challenge issuance
-rate limits remain unimplemented. Enforce rate limits before exposing challenge operations.
-Existing scan creation continues to persist Phase 2 records only; the Phase 3 work does not alter
-Phase 2 permissions.
+and Phase 3B.3 server-side organization-target DNS TXT verification are implemented. The verifier
+uses the system-configured DNS resolver and bounded exact TXT matching, and atomically consumes
+challenges before marking targets verified. No target API or challenge rate limits are implemented;
+enforce rate limits before exposing challenge operations. A/AAAA safety validation, HTTP scanning,
+queues, workers, results, and production egress controls remain unimplemented. Existing scan
+creation continues to persist Phase 2 records only; the Phase 3 work does not alter Phase 2
+permissions and does not claim production readiness.
 
 ## Planned, not implemented
 

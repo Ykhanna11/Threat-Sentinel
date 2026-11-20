@@ -140,12 +140,14 @@ permissions are specified separately in the
 [Phase 3 architecture blueprint](./phase-3-architecture.md#authorization-matrix-and-api-boundary).
 This is one of nine approved architecture decisions; the complete Phase 3A specification remains
 formally approved and closed. Phase 3B is authorized and underway; Phase 3B.1 hostname
-canonicalization is implemented and pending final acceptance. DNS TXT ownership verification,
-secure DNS resolution, and scanning are not implemented. Phase 3B.2 adds organization target and
-challenge persistence only; challenge creation or consumption does not prove DNS ownership or mark
-a target verified, and no target API is exposed. These permissions do not change this implemented
-Phase 2 scan-record policy or expose future capabilities before their implementation and review.
-Challenge issuance rate limits remain a prerequisite before exposing target API routes.
+canonicalization is implemented and pending final acceptance. Phase 3B.2 adds organization target
+and challenge persistence; Phase 3B.3 adds server-side DNS TXT ownership verification and atomic
+challenge consumption for organization targets. No target API is exposed and no challenge rate
+limits are implemented.
+A/AAAA safety validation, scanning, and egress controls remain unimplemented. These permissions do
+not change this implemented Phase 2 scan-record policy or expose future capabilities before their
+implementation and review. Challenge issuance and verification rate limits are unimplemented and
+remain prerequisites before exposing target API routes.
 
 ### Authorization transaction and concurrency protocol (implemented; PostgreSQL integration tests)
 
