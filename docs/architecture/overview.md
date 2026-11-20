@@ -95,10 +95,13 @@ link, check active status, then access only that user's scans inside the same UO
 do not require organization membership. Organization scan operations lock User → Organization →
 Membership `FOR SHARE`, check statuses after locks, and use the locally stored membership role
 policy in the same UOW as scan access.
-The approved matrix allows `OWNER`, `ADMIN`, and `MEMBER` to create
-organization scans, while `VIEWER` cannot; all four roles may read and list organization scans.
-No other actions are approved. See the [authorization decision](./decisions.md#initial-website-domain-security-scan-authorization-service-and-protected-routes-implemented)
-for the complete matrix and denial/transaction rules.
+For the Phase 2 scan-record persistence routes, the approved matrix allows `OWNER`, `ADMIN`, and
+`MEMBER` to create organization scan records, while `VIEWER` cannot; all four roles may read and
+list those records. This does not grant access to future target management, scan execution,
+findings, or evidence. The [Phase 3 architecture blueprint](./phase-3-architecture.md#authorization-matrix-and-api-boundary)
+defines their separate approved permissions. See the
+[Phase 2 authorization decision](./decisions.md#initial-website-domain-security-scan-authorization-service-and-protected-routes-implemented)
+for the current persistence-route matrix and denial/transaction rules.
 
 The server determines ownership and scope. Data access constrains resource ID and authorized scope
 together. Domain exceptions distinguish missing or inaccessible resources/scopes (`404`), active
@@ -133,6 +136,20 @@ not imply remote CI success, production deployment, or readiness. See the
 - Keep external authentication at a provider adapter boundary, while local user state, organization membership, and authorization remain application-owned.
 - Introduce provider-neutral adapters at actual integration boundaries, including future local/cloud inference. No AI provider is selected or integrated.
 - Treat tenancy, privacy, retention, authorization, and auditability as architecture requirements before adding sensitive workflows.
+
+## Phase 3 architecture blueprint
+
+The [Phase 3 architecture, threat model, and implementation blueprint](./phase-3-architecture.md)
+records nine product-owner-approved architecture decisions and the detailed proposed design for
+exact-host DNS TXT verification, controlled outbound networking, a PostgreSQL-backed queue, an
+isolated Python worker, and read-only detection modules. The Phase 3A specification is formally
+approved and closed; Phase 3B is authorized and underway. Phase 3B.1 hostname canonicalization is
+implemented and pending final acceptance. Phase 3B.2 organization target and challenge persistence
+is implemented as a foundation only. It does not verify DNS ownership or mark targets verified;
+DNS TXT verification, secure DNS resolution, scanning, target API routes, and challenge issuance
+rate limits remain unimplemented. Enforce rate limits before exposing challenge operations.
+Existing scan creation continues to persist Phase 2 records only; the Phase 3 work does not alter
+Phase 2 permissions.
 
 ## Planned, not implemented
 

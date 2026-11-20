@@ -11,6 +11,15 @@ class OrganizationScanAction(StrEnum):
     LIST = "list"
 
 
+class OrganizationTargetAction(StrEnum):
+    """Organization target-management actions, separate from the Phase 2 scan policy."""
+
+    CREATE = "create"
+    ROTATE_CHALLENGE = "rotate_challenge"
+    REVOKE_CHALLENGE = "revoke_challenge"
+    CONSUME_CHALLENGE = "consume_challenge"
+
+
 _ALLOWED_ROLES_BY_ACTION: dict[OrganizationScanAction, frozenset[OrganizationRole]] = {
     OrganizationScanAction.CREATE: frozenset(
         {
@@ -38,6 +47,9 @@ _ALLOWED_ROLES_BY_ACTION: dict[OrganizationScanAction, frozenset[OrganizationRol
 }
 
 
+_ALLOWED_TARGET_ROLES = frozenset({OrganizationRole.OWNER, OrganizationRole.ADMIN})
+
+
 def allows_organization_scan_action(
     role: OrganizationRole,
     action: OrganizationScanAction,
@@ -48,3 +60,13 @@ def allows_organization_scan_action(
 
     allowed_roles = _ALLOWED_ROLES_BY_ACTION.get(action)
     return allowed_roles is not None and role in allowed_roles
+
+
+def allows_organization_target_action(
+    role: OrganizationRole,
+    action: OrganizationTargetAction,
+) -> bool:
+    """Return whether a locally assigned role may manage organization targets."""
+    if not isinstance(role, OrganizationRole) or not isinstance(action, OrganizationTargetAction):
+        return False
+    return role in _ALLOWED_TARGET_ROLES

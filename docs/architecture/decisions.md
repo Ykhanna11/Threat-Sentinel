@@ -102,8 +102,9 @@ the owner of a personal scan from the authenticated principal; client-supplied o
 establish ownership. Authenticated users may create personal scans and may list/read only their own;
 personal scans do not require organization membership.
 
-Organization scans require an active local user, active organization, and active local membership.
-Only the following initial actions are approved; role names do not imply any additional permissions:
+Organization scan-record persistence operations require an active local user, active organization,
+and active local membership. The following matrix applies only to the Phase 2 persistence routes;
+role names do not imply any additional permissions on those routes:
 
 | Action | OWNER | ADMIN | MEMBER | VIEWER |
 | --- | --- | --- | --- | --- |
@@ -133,6 +134,18 @@ organization, membership, or internal denial details. The specific exceptions pr
 outcome distinction; the compatibility `OrganizationAccessDenied` base is not itself mapped.
 Product scan routes use these handlers and are mounted under `/api/v1`; no scan execution,
 findings, or analysis capabilities are exposed.
+
+The product-owner-approved future Phase 3 target, execution, findings, evidence, and cancellation
+permissions are specified separately in the
+[Phase 3 architecture blueprint](./phase-3-architecture.md#authorization-matrix-and-api-boundary).
+This is one of nine approved architecture decisions; the complete Phase 3A specification remains
+formally approved and closed. Phase 3B is authorized and underway; Phase 3B.1 hostname
+canonicalization is implemented and pending final acceptance. DNS TXT ownership verification,
+secure DNS resolution, and scanning are not implemented. Phase 3B.2 adds organization target and
+challenge persistence only; challenge creation or consumption does not prove DNS ownership or mark
+a target verified, and no target API is exposed. These permissions do not change this implemented
+Phase 2 scan-record policy or expose future capabilities before their implementation and review.
+Challenge issuance rate limits remain a prerequisite before exposing target API routes.
 
 ### Authorization transaction and concurrency protocol (implemented; PostgreSQL integration tests)
 

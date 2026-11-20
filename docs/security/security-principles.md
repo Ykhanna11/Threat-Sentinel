@@ -59,12 +59,21 @@ This document defines engineering principles for future implementation. The curr
   exactly one personal or organization scope. Authenticated users may create personal scans, whose
   ownership comes from the authenticated principal, never a client-supplied owner ID; personal scans
   require no organization membership and are readable/listable only by their owner. Organization
-  scans require an active local user, active organization, and active local membership. The approved
-  role matrix allows `OWNER`, `ADMIN`, and `MEMBER` to create organization scans;
-  `VIEWER` is denied creation; all four may read and list organization scans. No other actions are
-  approved; see the [architecture decision](../architecture/decisions.md#initial-website-domain-security-scan-authorization-service-and-protected-routes-implemented).
-  The scan service enforces this policy, and protected persistence routes expose only these
-  operations. Scan execution and analysis are not implemented.
+  scan-record operations require an active local user, active organization, and active local
+  membership. The Phase 2 persistence-route matrix allows `OWNER`, `ADMIN`, and `MEMBER` to create
+  records; `VIEWER` is denied creation; all four may read and list records. The scan service
+  enforces this policy, and the protected persistence routes expose only these operations. This is
+  not the permission policy for future target, execution, findings, or evidence APIs; those
+  product-owner-approved distinctions are specified in the
+  [Phase 3 architecture blueprint](../architecture/phase-3-architecture.md#authorization-matrix-and-api-boundary).
+  This is one of nine product-owner-approved architecture decisions. The Phase 3A specification is
+  formally approved and closed, and Phase 3B is authorized and underway. Phase 3B.1 hostname
+  canonicalization is implemented and pending final acceptance; DNS TXT ownership verification,
+  secure DNS resolution, and scanning are not implemented. Phase 3B.2 adds organization target and
+  challenge persistence only; creating, rotating, revoking, or consuming a challenge does not prove
+  DNS ownership or mark a target verified. No target API is exposed. These future permissions do
+  not change Phase 2 scan-record behavior. Challenge issuance rate limits must be implemented before
+  exposing target routes. Scan execution and analysis are not implemented.
 - **Constrain resource lookups:** combine the resource ID and authorized personal-owner or
   organization scope in the database query; do not globally load by UUID and rely only on a later
   application-layer check. Return the same generic `404` for missing and out-of-scope resources;

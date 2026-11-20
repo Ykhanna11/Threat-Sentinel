@@ -7,6 +7,10 @@ from threat_sentinel_api.modules.tenants.models import (
 )
 from threat_sentinel_api.modules.scans.models import SecurityScan
 from threat_sentinel_api.modules.audit.models import SecurityAuditEvent
+from threat_sentinel_api.modules.targets.models import (
+    SecurityTarget,
+    TargetVerificationChallenge,
+)
 
 metadata = Base.metadata
 
@@ -17,6 +21,8 @@ __all__ = [
     "OrganizationMembership",
     "SecurityScan",
     "SecurityAuditEvent",
+    "SecurityTarget",
+    "TargetVerificationChallenge",
     "User",
     "metadata",
 ]
